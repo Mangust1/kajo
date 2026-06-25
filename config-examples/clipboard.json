@@ -1,0 +1,7 @@
+{
+  "historyCap": 100,
+  "secretTTLSeconds": 20,
+  "maxImageMB": 5,
+  "nvrPath": "~/Library/Python/3.14/bin/nvr",
+  "nvimSocket": "/tmp/nvimsocket2"
+}

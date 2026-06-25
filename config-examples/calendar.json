@@ -1,0 +1,7 @@
+{
+  "homeTimezone": "Europe/Helsinki",
+  "cities": [
+    {"name": "Helsinki", "tz": "Europe/Helsinki", "lat": 60.1699, "lon": 24.9384},
+    {"name": "London",   "tz": "Europe/London",   "lat": 51.5074, "lon": -0.1278}
+  ]
+}

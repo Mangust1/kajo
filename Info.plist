@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Kajo</string>
+    <key>CFBundleDisplayName</key>
+    <string>Kajo</string>
+    <key>CFBundleIdentifier</key>
+    <string>fi.mangusti.kajo</string>
+    <key>CFBundleExecutable</key>
+    <string>Kajo</string>
+    <key>CFBundleIconFile</key>
+    <string>Kajo</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Kajo reads and controls Spotify playback to show Now Playing.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Kajo lists and connects your paired Bluetooth audio devices.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Kajo needs Location access to scan for nearby Wi-Fi networks and show local weather.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Kajo shows your upcoming events in the Calendar tab.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Kajo shows your upcoming events in the Calendar tab.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>fi.mangusti.kajo</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>kajo</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
