@@ -2419,10 +2419,14 @@ final class VPNModel: ObservableObject {
     func refresh() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            // Tailscale via its CLI (authoritative). `tailscale ip -4` prints the
-            // tailnet IP when up, errors (empty) when down.
-            let tsip = Self.runTS(["ip", "-4"]).split(separator: "\n").first.map(String.init) ?? ""
-            let tsUp = tsip.hasPrefix("100.")
+            // Up/down is authoritative via BackendState. `tailscale ip -4` reports
+            // the node's assigned IP even when STOPPED, so it can't gauge up/down.
+            var tsUp = false
+            if let d = Self.runTS(["status", "--json"]).data(using: .utf8),
+               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                tsUp = (o["BackendState"] as? String) == "Running"
+            }
+            let tsip = tsUp ? (Self.runTS(["ip", "-4"]).split(separator: "\n").first.map(String.init) ?? "") : ""
             var tg = false, ov = false, nd = false, tgip = "", ovip = "", ndip = ""
             for ip in self.utunIPv4s() {
                 if ip == tsip { continue }                                          // Tailscale's own utun — handled above
@@ -2488,7 +2492,9 @@ final class VPNModel: ObservableObject {
         tailscaleBusy = true
         let goingUp = !tailscaleUp
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            _ = Self.runTS([goingUp ? "up" : "down"])
+            // --accept-dns=false: never let Tailscale hijack DNS via MagicDNS
+            // (100.100.100.100), which broke Google/Anthropic resolution.
+            _ = Self.runTS(goingUp ? ["up", "--accept-dns=false"] : ["down"])
             Thread.sleep(forTimeInterval: 0.6)                 // let the interface settle
             DispatchQueue.main.async { self?.tailscaleBusy = false; self?.refresh() }
         }
