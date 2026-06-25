@@ -3,3 +3,6 @@ Lumo.app/
 .DS_Store
 .unifi-creds
 Lumo Dev.app/
+
+# build artifact
+Kajo.app/

@@ -21,7 +21,9 @@ $(EXEC): Sources/*.swift
 $(PLIST): Info.plist
 	@mkdir -p $(BUNDLE)/Contents
 	cp Info.plist $(PLIST)
-	@$(LSREG) -f $(BUNDLE) 2>/dev/null || true
+	# NB: do NOT lsregister the repo bundle here — only `install` registers the
+	# /Applications copy for kajo://. Otherwise the repo build also claims the
+	# scheme and can shadow the live app → duplicate instances (the Lumo trap).
 
 # Build, kill any running instance, relaunch (registers URL scheme too).
 run: build
