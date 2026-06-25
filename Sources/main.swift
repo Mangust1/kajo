@@ -11,6 +11,7 @@ import CoreLocation
 import EventKit
 import UniformTypeIdentifiers
 import ApplicationServices   // Accessibility API (AXUIElement) for quake window control
+import QuartzCore            // CADisplayLink — vsync-synced panel animation
 
 // Per-install config dir: "kajo" for the real app, "kajo-dev" for the dev build,
 // so the two never share state. (ponytail: one derived constant, no flag.)
@@ -3807,7 +3808,15 @@ final class PanelController {
         }
     }
 
-    private var animTimer: Timer?
+    // CADisplayLink-driven animation state (vsync-synced; time-based so it's
+    // smooth at any refresh rate — 60/100/120 Hz alike).
+    private var animLink: CADisplayLink?
+    private var animFrom: NSPoint = .zero
+    private var animTo: NSPoint = .zero
+    private var animStartT: CFTimeInterval = 0
+    private var animDur: Double = 0.001
+    private var animCurve: ((Double) -> Double)?
+    private var animDone: (() -> Void)?
 
     // Bounce: drops past the resting spot, then settles back up.
     private static func easeOutBack(_ p: Double) -> Double {
@@ -3817,23 +3826,34 @@ final class PanelController {
     }
     private static func easeInQuad(_ p: Double) -> Double { p * p }
 
-    // Manual frame-stepped animation — reliable regardless of NSWindow animator quirks.
+    // Vsync-synced animation: a CADisplayLink bound to the panel's screen drives
+    // frames at the display's native rate; progress is time-based so duration is
+    // honored regardless of refresh rate.
     private func animateOrigin(to target: NSPoint, duration: Double,
                                curve: @escaping (Double) -> Double, then: (() -> Void)? = nil) {
-        animTimer?.invalidate()
-        let start = panel.frame.origin
-        let total = max(1, Int(duration * 60))
-        var i = 0
-        animTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] t in
-            guard let self else { t.invalidate(); return }
-            i += 1
-            let p = min(1.0, Double(i) / Double(total))
-            let e = curve(p)
-            self.panel.setFrameOrigin(NSPoint(x: start.x + (target.x - start.x) * e,
-                                              y: start.y + (target.y - start.y) * e))
-            if p >= 1.0 { t.invalidate(); self.animTimer = nil; then?() }
+        animLink?.invalidate()
+        animFrom = panel.frame.origin
+        animTo = target
+        animDur = max(0.001, duration)
+        animStartT = CACurrentMediaTime()
+        animCurve = curve
+        animDone = then
+        let view = panel.contentView ?? NSView()
+        let link = view.displayLink(target: self, selector: #selector(stepAnim))
+        link.add(to: .main, forMode: .common)   // keep firing during event tracking
+        animLink = link
+    }
+
+    @objc private func stepAnim() {
+        let p = min(1.0, (CACurrentMediaTime() - animStartT) / animDur)
+        let e = animCurve?(p) ?? p
+        panel.setFrameOrigin(NSPoint(x: animFrom.x + (animTo.x - animFrom.x) * e,
+                                     y: animFrom.y + (animTo.y - animFrom.y) * e))
+        if p >= 1.0 {
+            animLink?.invalidate(); animLink = nil
+            let done = animDone; animDone = nil
+            done?()
         }
-        RunLoop.main.add(animTimer!, forMode: .common)   // keep firing during event tracking
     }
 
     private func show() {
