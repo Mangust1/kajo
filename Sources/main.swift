@@ -3384,6 +3384,82 @@ struct MemesTab: View {
     }
 }
 
+// MARK: - URL cleaner (kajo://clip/clean, Hyper+U)
+//
+// Strips tracking params from an http(s) URL string; returns nil if the input
+// isn't one. ponytail: param blocklist + an Amazon special case covers ~95% of
+// real links; add per-host rules here as they annoy in practice (ClearURLs-style
+// rule engine is the upgrade path if this list ever feels unmaintainable).
+func cleanedURL(_ raw: String) -> String? {
+    let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard var comps = URLComponents(string: s), let host = comps.host?.lowercased(),
+          comps.scheme == "http" || comps.scheme == "https" else { return nil }
+
+    // Amazon: everything but /dp/ASIN is noise (300 chars → 30).
+    if host.contains("amazon.") {
+        let parts = comps.path.split(separator: "/").map(String.init)
+        for (i, p) in parts.enumerated() where (p == "dp" || p == "product") && i + 1 < parts.count {
+            let asin = parts[i + 1]
+            if asin.count == 10, asin.allSatisfy({ $0.isLetter || $0.isNumber }) {
+                return "https://\(host)/dp/\(asin)"
+            }
+        }
+    }
+
+    let junkPrefixes = ["utm_", "pk_", "mc_", "vero_", "oly_", "fb_", "hsa_", "matomo_", "piwik_"]
+    let junk: Set<String> = ["fbclid", "gclid", "gclsrc", "dclid", "msclkid", "yclid", "twclid",
+                             "ttclid", "igsh", "igshid", "srsltid", "spm", "sk", "_hsenc", "_hsmi",
+                             "wt_mc", "cmpid", "ncid", "li_fat_id", "ref", "ref_src", "ref_url",
+                             "soc_src", "soc_trk", "wickedid", "sms_source", "gbraid", "wbraid"]
+    // Pure share-tracking on these hosts, but meaningful elsewhere — keep host-scoped.
+    var hostJunk: Set<String> = []
+    if host.contains("youtube.com") || host == "youtu.be" { hostJunk = ["si", "feature", "pp"] }
+    else if host.contains("spotify.com") { hostJunk = ["si"] }
+    else if host == "x.com" || host.contains("twitter.com") { hostJunk = ["s", "t"] }
+
+    // percentEncodedQueryItems (not queryItems) so kept values stay byte-identical.
+    let kept = (comps.percentEncodedQueryItems ?? []).filter { item in
+        let n = item.name.lowercased()
+        return !junk.contains(n) && !hostJunk.contains(n)
+            && !junkPrefixes.contains { n.hasPrefix($0) }
+    }
+    comps.percentEncodedQueryItems = kept.isEmpty ? nil : kept
+    return comps.string
+}
+
+// Tiny transient HUD — feedback for headless kajo:// actions (no panel shown).
+func showHUD(_ text: String) {
+    let label = NSTextField(labelWithString: text)
+    label.font = .monospacedSystemFont(ofSize: 13, weight: .semibold)
+    label.textColor = NSColor(red: 0.92, green: 0.86, blue: 0.70, alpha: 1)   // gruvbox fg
+    label.sizeToFit()
+    let pad: CGFloat = 14
+    let size = NSSize(width: label.frame.width + pad * 2, height: label.frame.height + pad)
+    let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    panel.level = .statusBar
+    panel.isOpaque = false
+    panel.backgroundColor = .clear
+    panel.ignoresMouseEvents = true
+    panel.collectionBehavior = [.canJoinAllSpaces, .transient]
+    let bg = NSView(frame: NSRect(origin: .zero, size: size))
+    bg.wantsLayer = true
+    bg.layer?.backgroundColor = NSColor(red: 0.157, green: 0.157, blue: 0.157, alpha: 0.95).cgColor
+    bg.layer?.cornerRadius = 9
+    label.frame.origin = NSPoint(x: pad, y: pad / 2)
+    bg.addSubview(label)
+    panel.contentView = bg
+    if let screen = NSScreen.main {
+        let f = screen.visibleFrame
+        panel.setFrameOrigin(NSPoint(x: f.midX - size.width / 2, y: f.maxY - size.height - 60))
+    }
+    panel.orderFrontRegardless()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+        NSAnimationContext.runAnimationGroup({ ctx in ctx.duration = 0.25; panel.animator().alphaValue = 0 },
+                                             completionHandler: { panel.orderOut(nil) })
+    }
+}
+
 // MARK: - Clipboard tab (replaces Maccy + Hammerspoon Hyper+V)
 //
 // App-lifetime clipboard monitor: polls NSPasteboard.changeCount every 0.5s (the
@@ -3552,6 +3628,30 @@ final class ClipboardModel: ObservableObject {
         select(items[1])
     }
 
+    // Headless (kajo://clip/clean): strip tracking junk off the URL currently on
+    // the clipboard. Writes back WITHOUT suppressing capture, so the cleaned URL
+    // lands in history as a new item on the monitor's next tick.
+    func cleanClipboardURL() {
+        let pb = NSPasteboard.general
+        guard let s = pb.string(forType: .string), let cleaned = cleanedURL(s) else {
+            showHUD("🧹 not a URL"); return
+        }
+        if cleaned == s.trimmingCharacters(in: .whitespacesAndNewlines) {
+            showHUD("🧹 already clean"); return
+        }
+        pb.clearContents()
+        pb.setString(cleaned, forType: .string)
+        showHUD("🧹 URL cleaned")
+    }
+
+    // Row action: clean a history item's URL and copy the result (captured as a new item).
+    func cleanAndCopy(_ it: ClipItem) {
+        guard let t = it.text, let cleaned = cleanedURL(t) else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(cleaned, forType: .string)
+    }
+
     func delete(_ it: ClipItem) {
         if it.kind == .image, let f = it.file { try? FileManager.default.removeItem(at: fileURL(f)) }
         items.removeAll { $0.id == it.id }
@@ -3666,6 +3766,13 @@ struct ClipboardTab: View {
                     .foregroundStyle(it.secret ? Gruv.yellow : Gruv.fg1)
                     .lineLimit(2)
                 Spacer(minLength: 0)
+                if !it.secret, let t = it.text, cleanedURL(t) != nil {
+                    Button { model.cleanAndCopy(it); dismiss() } label: {
+                        Image(systemName: "wand.and.stars").font(.caption).foregroundStyle(Gruv.yellow)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clean URL & copy")
+                }
                 if it.secret, let exp = it.expiresAt {
                     TimelineView(.periodic(from: .now, by: 1)) { ctx in
                         Text("\(max(0, Int(exp.timeIntervalSince(ctx.date).rounded(.up))))s")
@@ -3683,6 +3790,9 @@ struct ClipboardTab: View {
         .contextMenu {
             Button("Copy") { model.select(it) }
             if it.kind == .text { Button("→ vim") { model.pasteToVim(it); dismiss() } }
+            if let t = it.text, !it.secret, cleanedURL(t) != nil {
+                Button("🧹 Clean URL & copy") { model.cleanAndCopy(it); dismiss() }
+            }
             Divider()
             Button("Delete", role: .destructive) { model.delete(it) }
         }
@@ -4150,9 +4260,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelega
     }
 
     private func handle(_ url: URL) {
-        // Headless clipboard actions (no panel shown): kajo://clip/prev
+        // Headless clipboard actions (no panel shown): kajo://clip/prev, kajo://clip/clean
         if url.host == "clip" {
-            if (url.pathComponents.last ?? "") == "prev" { controller.clipboard.copyPrevious() }
+            switch url.pathComponents.last ?? "" {
+            case "prev":  controller.clipboard.copyPrevious()
+            case "clean": controller.clipboard.cleanClipboardURL()
+            default: break
+            }
             return
         }
         if url.host == "hide" {   // kajo://hide — close the panel (e.g. from Hammerspoon Hyper+V)
@@ -4188,6 +4302,12 @@ private extension String {
 }
 
 // MARK: - Bootstrap
+
+// Self-check / scripting: `Kajo --clean-url <url>` prints the cleaned URL and exits.
+if let i = CommandLine.arguments.firstIndex(of: "--clean-url"), i + 1 < CommandLine.arguments.count {
+    print(cleanedURL(CommandLine.arguments[i + 1]) ?? CommandLine.arguments[i + 1])
+    exit(0)
+}
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
