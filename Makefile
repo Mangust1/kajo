@@ -3,7 +3,7 @@ BUNDLE   := $(APP).app
 EXEC     := $(BUNDLE)/Contents/MacOS/$(APP)
 PLIST    := $(BUNDLE)/Contents/Info.plist
 LSREG    := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-SIGN_ID  := Lumo Self-Signed
+SIGN_ID  := Kajo Self-Signed
 DEV_APP  := Kajo Dev.app
 
 .PHONY: build run install reload dev clean

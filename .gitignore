@@ -1,8 +1,7 @@
-Lumo.app/
 *.o
 .DS_Store
 .unifi-creds
-Lumo Dev.app/
 
-# build artifact
+# build artifacts
 Kajo.app/
+Kajo Dev.app/
