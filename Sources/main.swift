@@ -3413,13 +3413,16 @@ func cleanedURL(_ raw: String) -> String? {
                              "soc_src", "soc_trk", "wickedid", "sms_source", "gbraid", "wbraid"]
     // Pure share-tracking on these hosts, but meaningful elsewhere — keep host-scoped.
     var hostJunk: Set<String> = []
-    if host.contains("youtube.com") || host == "youtu.be" { hostJunk = ["si", "feature", "pp"] }
+    if host.contains("youtube.com") || host == "youtu.be" { hostJunk = ["si", "feature", "pp", "start_radio"] }
     else if host.contains("spotify.com") { hostJunk = ["si"] }
     else if host == "x.com" || host.contains("twitter.com") { hostJunk = ["s", "t"] }
 
     // percentEncodedQueryItems (not queryItems) so kept values stay byte-identical.
     let kept = (comps.percentEncodedQueryItems ?? []).filter { item in
         let n = item.name.lowercased()
+        // ponytail: list=RD… is an auto-generated radio mix, not a saved playlist — drop it
+        if n == "list", (item.value ?? "").hasPrefix("RD"),
+           host.contains("youtube.com") || host == "youtu.be" { return false }
         return !junk.contains(n) && !hostJunk.contains(n)
             && !junkPrefixes.contains { n.hasPrefix($0) }
     }
