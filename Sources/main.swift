@@ -3497,6 +3497,8 @@ final class ClipboardModel: ObservableObject {
     private let maxImageBytes: Int
     private let nvrPath: String
     private let nvimSocket: String
+    private let kdeconnectCli: String
+    private let kdeconnectDevice: String
 
     private static let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
     private static let transient = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
@@ -3508,7 +3510,7 @@ final class ClipboardModel: ObservableObject {
         filesDir = base.appendingPathComponent("files")
         indexURL = base.appendingPathComponent("index.json")
         try? FileManager.default.createDirectory(at: filesDir, withIntermediateDirectories: true)
-        // clipboard.json (optional): historyCap, secretTTLSeconds, maxImageMB, nvrPath, nvimSocket
+        // clipboard.json (optional): historyCap, secretTTLSeconds, maxImageMB, nvrPath, nvimSocket, kdeconnectCli, kdeconnectDeviceId
         let cfg = (try? Data(contentsOf: URL(fileURLWithPath: kajoConfigDir + "/clipboard.json")))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
         cap = (cfg["historyCap"] as? Int) ?? 100
@@ -3516,6 +3518,8 @@ final class ClipboardModel: ObservableObject {
         maxImageBytes = ((cfg["maxImageMB"] as? Int) ?? 5) * 1024 * 1024
         nvrPath = ((cfg["nvrPath"] as? String).map { ($0 as NSString).expandingTildeInPath }) ?? (NSHomeDirectory() + "/Library/Python/3.14/bin/nvr")
         nvimSocket = (cfg["nvimSocket"] as? String) ?? "/tmp/nvimsocket2"
+        kdeconnectCli = (cfg["kdeconnectCli"] as? String) ?? "/Applications/KDE Connect.app/Contents/MacOS/kdeconnect-cli"
+        kdeconnectDevice = (cfg["kdeconnectDeviceId"] as? String) ?? ""  // ponytail: empty = first available device
         load()
     }
 
@@ -3675,6 +3679,21 @@ final class ClipboardModel: ObservableObject {
         try? p.run()
     }
 
+    // Text → the Android device's clipboard via KDE Connect (copy-style: item also
+    // lands on the Mac pasteboard + moves to top, same as clicking it).
+    func sendToThor(_ it: ClipItem) {
+        guard it.kind == .text, !it.secret else { return }
+        select(it)
+        guard FileManager.default.fileExists(atPath: kdeconnectCli) else { return }
+        let dev = kdeconnectDevice.isEmpty
+            ? "$('\(kdeconnectCli)' --list-available --id-only | head -n1)"
+            : "'\(kdeconnectDevice)'"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-lc", "'\(kdeconnectCli)' -d \(dev) --send-clipboard"]
+        try? p.run()
+    }
+
     // Persist NON-secret items only — secrets never touch disk.
     private func persist() {
         let durable = items.filter { $0.expiresAt == nil && !$0.secret }
@@ -3793,6 +3812,7 @@ struct ClipboardTab: View {
         .contextMenu {
             Button("Copy") { model.select(it) }
             if it.kind == .text { Button("→ vim") { model.pasteToVim(it); dismiss() } }
+            if it.kind == .text, !it.secret { Button("📱 → Thor") { model.sendToThor(it); dismiss() } }
             if let t = it.text, !it.secret, cleanedURL(t) != nil {
                 Button("🧹 Clean URL & copy") { model.cleanAndCopy(it); dismiss() }
             }
