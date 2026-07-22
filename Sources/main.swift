@@ -3420,6 +3420,12 @@ func cleanedURL(_ raw: String) -> String? {
     if host.contains("youtube.com") || host == "youtu.be" { hostJunk = ["si", "feature", "pp", "start_radio"] }
     else if host.contains("spotify.com") { hostJunk = ["si"] }
     else if host == "x.com" || host.contains("twitter.com") { hostJunk = ["s", "t"] }
+    // Booking.com: session/affiliate + search-results tracking. Keeps checkin/checkout/party size.
+    else if host.contains("booking.com") {
+        hostJunk = ["sid", "aid", "label", "ucfs", "sr_order", "srpvid", "srepoch",
+                    "matching_block_id", "atlas_src", "highlighted_blocks",
+                    "dest_id", "dest_type"]
+    }
 
     // percentEncodedQueryItems (not queryItems) so kept values stay byte-identical.
     let kept = (comps.percentEncodedQueryItems ?? []).filter { item in
