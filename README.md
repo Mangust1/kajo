@@ -6,9 +6,9 @@
 
 A Noctalia-inspired drop-down control center for macOS: **one translucent, Gruvbox-themed window with everything on tabs**, summoned pre-switched to whichever tab you ask for. Pure `swiftc` + a Makefile — **no Xcode**. Runs as an `LSUIElement` agent (no dock icon).
 
-14 tabs. Some work for anyone; some expect the author's home-lab and just show a "No config" hint until you point them at your own services:
+15 tabs. Some work for anyone; some expect the author's home-lab and just show a "No config" hint until you point them at your own services:
 
-- **Universal:** Calendar (world clocks + weather + events), Timer, Now Playing (Spotify), Sound, Power, Network, System, Memes, Clipboard (with a URL tracking-param cleaner — `kajo://clip/clean` — and send-to-Android via KDE Connect).
+- **Universal:** Calendar (world clocks + weather + events), Timer, Now Playing (Spotify), Sound, Power, Network, System, Memes, Clipboard (with a URL tracking-param cleaner — `kajo://clip/clean` — and send-to-Android via KDE Connect), Currency (live EUR/THB/MYR converter via ECB rates, no API key).
 - **Needs your own backend (optional):** UniFi, Home (Home Assistant), Pi (a small health container), VPN, AI (a local oMLX server).
 
 > ⚠️ It's a personal tool, not a polished product. It has a **built-in menu-bar icon** (plus `kajo://tab/<name>` URLs) to summon the panel, and reads optional per-module config from `~/.config/kajo/` (see `config-examples/`). Getting it running on a fresh Mac still means building it and sorting out code-signing. The prompt below hands all of that to Claude Code.
@@ -109,4 +109,4 @@ open "kajo://tab/calendar"      # or music, sound, power, network, timer, system
 
 ## Status
 
-v0.21 — 12 working tabs, quake-style slide animation, code-signed (TCC persists), UniFi/Network/Pi cached for instant open.
+v0.21 — 15 working tabs, quake-style slide animation, code-signed (TCC persists), UniFi/Network/Pi cached for instant open.
