@@ -803,7 +803,10 @@ final class SystemModel: ObservableObject {
         if keepAwake {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-            p.arguments = ["-d", "-i"]   // prevent display + idle sleep until killed
+            // -w <own pid>: caffeinate auto-exits when Kajo does (quit/reinstall/crash/SIGKILL),
+            // so it can never orphan and block sleep across app lifetimes. terminate() below
+            // still handles the normal in-session toggle-off.
+            p.arguments = ["-d", "-i", "-w", "\(ProcessInfo.processInfo.processIdentifier)"]
             try? p.run()
             caffeinate = p
         } else {
@@ -3426,6 +3429,8 @@ func cleanedURL(_ raw: String) -> String? {
                     "matching_block_id", "atlas_src", "highlighted_blocks",
                     "dest_id", "dest_type"]
     }
+    // Threads: Meta share-tracking token + share-log flag. Post ID in the path is all that's needed.
+    else if host.contains("threads.com") || host.contains("threads.net") { hostJunk = ["xmt", "slof"] }
 
     // percentEncodedQueryItems (not queryItems) so kept values stay byte-identical.
     let kept = (comps.percentEncodedQueryItems ?? []).filter { item in
