@@ -26,11 +26,12 @@ A Noctalia-inspired drop-down control center for macOS: **one translucent, Gruvb
 Open this folder in [Claude Code](https://claude.com/claude-code) and paste the prompt below. It tells Claude exactly how to build, sign, launch, and personalize Kajo on **your** Mac — adapting to what you have installed and which services you actually run.
 
 ````text
-You're helping me install "Kajo", a single-file SwiftUI/AppKit macOS menu-tool
-that lives in this repo (Sources/main.swift, built with swiftc via the Makefile —
+You're helping me install "Kajo", a SwiftUI/AppKit macOS menu-tool
+that lives in this repo (Sources/*.swift — one file per tab plus Theme/Config/Panel/App
+infra; built with swiftc via the Makefile —
 no Xcode). It's the original author's personal control-center, so part of your job
 is to make it work on MY Mac and strip out anything hardwired to them. Read
-Sources/main.swift, the Makefile, and Info.plist first, then walk me through this,
+the Sources/*.swift files (start with main.swift + Panel.swift), the Makefile, and Info.plist first, then walk me through this,
 asking me before anything that needs my input. Explain trade-offs; don't assume I
 have the author's home-lab.
 
@@ -55,10 +56,10 @@ have the author's home-lab.
    - If I run [sketchybar](https://github.com/FelixKratz/SketchyBar): add click_scripts like `open 'kajo://tab/calendar'`.
    - Otherwise, offer me a choice and implement it: a global hotkey (skhd /
      Hammerspoon / Raycast / macOS Shortcuts), OR add a small NSStatusItem menu-bar
-     button to Sources/main.swift that toggles the panel (good default for a normal
+     button (in App.swift) that toggles the panel (good default for a normal
      user — implement it cleanly if I pick this).
 
-4. PERSONALIZE — in Sources/main.swift, replace the hardcoded `worldCities`
+4. PERSONALIZE — in Sources/Calendar.swift, replace the hardcoded `worldCities`
    (currently Helsinki / Kuala Lumpur / Málaga) with MY cities: name, IANA timezone,
    latitude, longitude (weather uses Open-Meteo, no API key). Also update the `home`
    timezone in WorldClocksView. Rebuild + reinstall.
@@ -104,9 +105,9 @@ open "kajo://tab/calendar"      # or music, sound, power, network, timer, system
 
 - **Signing:** the Makefile signs with `SIGN_ID := Kajo Self-Signed`. Create your own cert by that name, or set `SIGN_ID := -` for ad-hoc signing.
 - **Open it:** wire `open 'kajo://tab/<name>'` to a hotkey, a [sketchybar](https://github.com/FelixKratz/SketchyBar) item, or add a menu-bar button. Re-firing the same tab toggles it closed; click outside or press `Esc` to dismiss.
-- **Personalize:** edit `worldCities` and the home timezone in `Sources/main.swift`.
+- **Personalize:** edit `worldCities` and the home timezone in `Sources/Calendar.swift`.
 - **Optional configs:** `~/.config/kajo/{unifi,ha,pi}.json` (mode 600). Absent = that tab shows "No config".
 
 ## Status
 
-v0.21 — 15 working tabs, quake-style slide animation, code-signed (TCC persists), UniFi/Network/Pi cached for instant open.
+v0.21 — 15 working tabs, quake-style slide animation, code-signed (TCC persists), UniFi/Network/Pi cached for instant open. Source split per-tab across `Sources/*.swift` (main.swift = bootstrap only).
