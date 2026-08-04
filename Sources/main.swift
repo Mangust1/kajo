@@ -1167,10 +1167,30 @@ final class SoundModel: ObservableObject {
 
 // MARK: - Bluetooth (paired audio devices via blueutil)
 
+struct BTBattery: Equatable {
+    var left: Int?
+    var right: Int?
+    var caseLevel: Int?
+    var main: Int?
+    var isEmpty: Bool { left == nil && right == nil && caseLevel == nil && main == nil }
+    var label: String {
+        if left != nil || right != nil || caseLevel != nil {
+            var parts: [String] = []
+            if let l = left { parts.append("L \(l)%") }
+            if let r = right { parts.append("R \(r)%") }
+            if let c = caseLevel { parts.append("Case \(c)%") }
+            return parts.joined(separator: "  ")
+        }
+        if let m = main { return "\(m)%" }
+        return ""
+    }
+}
+
 struct BTDevice: Identifiable, Equatable {
     let id: String   // MAC address
     let name: String
     var connected: Bool
+    var battery: BTBattery? = nil
 }
 
 final class BluetoothModel: ObservableObject {
@@ -1192,6 +1212,14 @@ final class BluetoothModel: ObservableObject {
                 }
             }
             DispatchQueue.main.async { self.devices = found }
+
+            // Battery via system_profiler (~1s) — fetched after devices show, then merged in.
+            let batteries = self.batteryLevels()
+            DispatchQueue.main.async {
+                for i in self.devices.indices {
+                    self.devices[i].battery = batteries[Self.normAddr(self.devices[i].id)]
+                }
+            }
         }
     }
 
@@ -1223,6 +1251,40 @@ final class BluetoothModel: ObservableObject {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         return String(data: data, encoding: .utf8)
+    }
+
+    // Strip separators so IOBluetooth's "28-2d-…" matches system_profiler's "28:2D:…".
+    private static func normAddr(_ s: String) -> String {
+        s.lowercased().filter(\.isHexDigit)
+    }
+
+    // Parse per-device battery levels from `system_profiler SPBluetoothDataType -json`.
+    private func batteryLevels() -> [String: BTBattery] {
+        guard let out = run(["/usr/sbin/system_profiler", "SPBluetoothDataType", "-json"]),
+              let data = out.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let arr = root["SPBluetoothDataType"] as? [[String: Any]],
+              let connected = arr.first?["device_connected"] as? [[String: Any]]
+        else { return [:] }
+        func pct(_ v: Any?) -> Int? {
+            guard let s = v as? String else { return nil }
+            return Int(s.replacingOccurrences(of: "%", with: "")
+                        .trimmingCharacters(in: .whitespaces))
+        }
+        var map: [String: BTBattery] = [:]
+        for entry in connected {
+            for (_, val) in entry {
+                guard let p = val as? [String: Any],
+                      let addr = p["device_address"] as? String else { continue }
+                var b = BTBattery()
+                b.left = pct(p["device_batteryLevelLeft"])
+                b.right = pct(p["device_batteryLevelRight"])
+                b.caseLevel = pct(p["device_batteryLevelCase"])
+                b.main = pct(p["device_batteryLevelMain"])
+                if !b.isEmpty { map[Self.normAddr(addr)] = b }
+            }
+        }
+        return map
     }
 }
 
@@ -1271,7 +1333,14 @@ struct SoundTab: View {
                                 Image(systemName: icon(for: d.name))
                                     .frame(width: 18)
                                     .foregroundStyle(d.connected ? Gruv.aqua : Gruv.fg4)
-                                Text(d.name).foregroundStyle(Gruv.fg1).lineLimit(1)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(d.name).foregroundStyle(Gruv.fg1).lineLimit(1)
+                                    if d.connected, let b = d.battery, !b.isEmpty {
+                                        Text(b.label)
+                                            .font(.caption2)
+                                            .foregroundStyle(Gruv.fg4)
+                                    }
+                                }
                                 Spacer()
                                 if bt.busy.contains(d.id) {
                                     ProgressView().controlSize(.small)
