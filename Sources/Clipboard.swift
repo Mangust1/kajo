@@ -53,6 +53,8 @@ func cleanedURL(_ raw: String) -> String? {
     }
     // Threads: Meta share-tracking token + share-log flag. Post ID in the path is all that's needed.
     else if host.contains("threads.com") || host.contains("threads.net") { hostJunk = ["xmt", "slof"] }
+    // Goodreads: search/referral context on /book/show/ links. The path (ID.Title) is the whole link.
+    else if host.contains("goodreads.com") { hostJunk = ["from_search", "from_srp", "qid", "rank", "ac", "from_choice"] }
 
     // percentEncodedQueryItems (not queryItems) so kept values stay byte-identical.
     let kept = (comps.percentEncodedQueryItems ?? []).filter { item in
