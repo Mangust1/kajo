@@ -21,6 +21,7 @@ struct Ccy { let code: String; let flag: String }
 // the code must be in the ECB reference set Frankfurter serves (USD, GBP, JPY,
 // SGD, CNY, AUD, SEK, NOK, CHF, … — EUR is always the base). Keep EUR first.
 let currencies = [Ccy(code: "EUR", flag: "🇪🇺"),
+                  Ccy(code: "GBP", flag: "🇬🇧"),
                   Ccy(code: "THB", flag: "🇹🇭"),
                   Ccy(code: "MYR", flag: "🇲🇾")]
 
