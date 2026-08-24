@@ -8,7 +8,7 @@ A Noctalia-inspired drop-down control center for macOS: **one translucent, Gruvb
 
 15 tabs. Some work for anyone; some expect the author's home-lab and just show a "No config" hint until you point them at your own services:
 
-- **Universal:** Calendar (world clocks + weather + events), Timer, Now Playing (Spotify), Sound (output/input + Bluetooth audio battery levels — AirPods L/R/case), Power, Network, System, Memes, Clipboard (with a URL tracking-param cleaner — `kajo://clip/clean` — and send-to-Android via KDE Connect), Currency (live EUR/THB/MYR converter via ECB rates, no API key).
+- **Universal:** Calendar (world clocks + weather + events), Timer, Now Playing (Spotify), Sound (output/input + Bluetooth audio battery levels — AirPods L/R/case), Power, Network (Wi-Fi scan/join, service priority, and a speed test — built-in `networkQuality` or live-streaming Ookla `speedtest`), System, Memes, Clipboard (with a URL tracking cleaner — strips tracking params + Echobox/xtor fragments, `kajo://clip/clean` — and send-to-Android via KDE Connect), Currency (live EUR/THB/MYR converter via ECB rates, no API key).
 - **Needs your own backend (optional):** UniFi, Home (Home Assistant), Pi (a small health container), VPN, AI (a local oMLX server).
 
 > ⚠️ It's a personal tool, not a polished product. It has a **built-in menu-bar icon** (plus `kajo://tab/<name>` URLs) to summon the panel, and reads optional per-module config from `~/.config/kajo/` (see `config-examples/`). Getting it running on a fresh Mac still means building it and sorting out code-signing. The prompt below hands all of that to Claude Code.
@@ -110,4 +110,4 @@ open "kajo://tab/calendar"      # or music, sound, power, network, timer, system
 
 ## Status
 
-v0.21 — 15 working tabs, quake-style slide animation, code-signed (TCC persists), UniFi/Network/Pi cached for instant open. Source split per-tab across `Sources/*.swift` (main.swift = bootstrap only).
+v0.22 — 15 working tabs, quake-style slide animation, code-signed (TCC persists), UniFi/Network/Pi cached for instant open. Network tab gained a speed test (built-in `networkQuality` or live Ookla `speedtest`). Source split per-tab across `Sources/*.swift` (main.swift = bootstrap only).

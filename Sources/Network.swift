@@ -15,6 +15,8 @@ import QuartzCore            // CADisplayLink — vsync-synced panel animation
 
 // MARK: - Network (Wi-Fi toggle, current network, service priority)
 
+enum SpeedEngine: String { case builtin, ookla }
+
 struct WiFiNetwork: Identifiable, Equatable, Codable {
     let id: String
     let ssid: String
@@ -49,6 +51,16 @@ final class NetworkModel: ObservableObject {
     @Published var networks: [WiFiNetwork] = []
     @Published var scanning = false
     @Published var connecting = ""    // ssid currently being joined
+    @Published var speedtesting = false
+    @Published var speedPhase = ""    // "Downloading…" / "Uploading…"
+    @Published var speedEngine = SpeedEngine(rawValue: UserDefaults.standard.string(forKey: "net.speedEngine") ?? "") ?? .builtin {
+        didSet { UserDefaults.standard.set(speedEngine.rawValue, forKey: "net.speedEngine") }
+    }
+    // Ookla's official CLI streams live speeds; nil if not installed.
+    let ooklaPath: String? = ["/opt/homebrew/bin/speedtest", "/usr/local/bin/speedtest"]
+        .first { FileManager.default.isExecutableFile(atPath: $0) }
+    @Published var speedDown = ""     // "123 Mbps"
+    @Published var speedUp = ""
 
     private let dev = "en0"           // Wi-Fi interface on this Mac
     private let wifiService = "Wi-Fi" // service name in the order list
@@ -135,6 +147,76 @@ final class NetworkModel: ObservableObject {
         }.resume()
     }
 
+    func speedtest() {
+        guard !speedtesting else { return }
+        speedtesting = true; speedDown = ""; speedUp = ""; speedPhase = ""
+        if speedEngine == .ookla, ooklaPath != nil { runOokla() } else { runBuiltin() }
+    }
+
+    // macOS built-in throughput test (Monterey+). Two phases so each result
+    // lands as soon as it's measured (piped output only emits at phase end).
+    private func runBuiltin() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            func mbps(_ args: [String], _ key: String) -> String {
+                let out = self.sh("/usr/bin/networkQuality", ["-c"] + args) ?? ""
+                let json = out.data(using: .utf8).flatMap {
+                    try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+                }
+                guard let bps = json?[key] as? Double else { return "—" }
+                return String(format: "%.0f Mbps", bps / 1_000_000)
+            }
+            DispatchQueue.main.async { self.speedPhase = "Downloading…" }
+            let dl = mbps(["-u"], "dl_throughput")   // -u: skip upload
+            DispatchQueue.main.async { self.speedDown = dl; self.speedPhase = "Uploading…" }
+            let ul = mbps(["-d"], "ul_throughput")   // -d: skip download
+            DispatchQueue.main.async {
+                self.speedUp = ul; self.speedPhase = ""; self.speedtesting = false
+            }
+        }
+    }
+
+    // Ookla CLI: parse the jsonl stream line-by-line for live Mbps (bytes/sec → *8).
+    private func runOokla() {
+        guard let path = ooklaPath else { runBuiltin(); return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = ["-f", "jsonl", "-p", "no", "--accept-license", "--accept-gdpr"]
+        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
+        let h = pipe.fileHandleForReading
+        var buf = Data()
+        h.readabilityHandler = { [weak self] fh in
+            buf.append(fh.availableData)
+            while let nl = buf.firstIndex(of: 0x0a) {
+                let line = buf.subdata(in: buf.startIndex..<nl)
+                buf.removeSubrange(buf.startIndex...nl)
+                self?.handleOoklaLine(line)
+            }
+        }
+        p.terminationHandler = { [weak self] _ in
+            h.readabilityHandler = nil
+            DispatchQueue.main.async { self?.speedPhase = ""; self?.speedtesting = false }
+        }
+        do { try p.run() } catch { runBuiltin() }
+    }
+
+    private func handleOoklaLine(_ data: Data) {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = obj["type"] as? String else { return }
+        func mbps(_ key: String) -> String? {
+            guard let d = obj[key] as? [String: Any], let bw = d["bandwidth"] as? Double else { return nil }
+            return String(format: "%.0f Mbps", bw * 8 / 1_000_000)
+        }
+        DispatchQueue.main.async {
+            switch type {
+            case "download": self.speedPhase = "Downloading…"; mbps("download").map { self.speedDown = $0 }
+            case "upload":   self.speedPhase = "Uploading…";   mbps("upload").map { self.speedUp = $0 }
+            case "result":   mbps("download").map { self.speedDown = $0 }; mbps("upload").map { self.speedUp = $0 }
+            default: break
+            }
+        }
+    }
+
     func toggleWiFi() {
         let target = wifiOn ? "off" : "on"
         wifiOn.toggle()
@@ -201,29 +283,90 @@ struct NetworkTab: View {
     @State private var password = ""
 
     var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 11) {
-                    Image(systemName: model.wifiOn ? "wifi" : "wifi.slash")
-                        .font(.system(size: 18))
-                        .foregroundStyle(model.wifiOn ? Gruv.aqua : Gruv.fg4)
-                        .frame(width: 24)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Wi-Fi").foregroundStyle(Gruv.fg1)
-                        Text(model.ssid).font(.caption).foregroundStyle(Gruv.gray).lineLimit(1)
+        VStack(alignment: .leading, spacing: 12) {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(spacing: 11) {
+                        Image(systemName: model.wifiOn ? "wifi" : "wifi.slash")
+                            .font(.system(size: 18))
+                            .foregroundStyle(model.wifiOn ? Gruv.aqua : Gruv.fg4)
+                            .frame(width: 24)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Wi-Fi").foregroundStyle(Gruv.fg1)
+                            Text(model.ssid).font(.caption).foregroundStyle(Gruv.gray).lineLimit(1)
+                        }
+                        Spacer()
+                        Toggle("", isOn: Binding(get: { model.wifiOn }, set: { _ in model.toggleWiFi() }))
+                            .labelsHidden().toggleStyle(.switch).tint(Gruv.green)
                     }
-                    Spacer()
-                    Toggle("", isOn: Binding(get: { model.wifiOn }, set: { _ in model.toggleWiFi() }))
-                        .labelsHidden().toggleStyle(.switch).tint(Gruv.green)
+
+                    row("Local IP", model.ip)
+                    row("Public IP", model.publicIP)
+
+                    priority
+                    if model.wifiOn { networksList }
                 }
-
-                row("Local IP", model.ip)
-                row("Public IP", model.publicIP)
-
-                priority
-                if model.wifiOn { networksList }
+                .padding(.bottom, 8)
             }
-            .padding(.bottom, 8)
+
+            Divider().overlay(Gruv.bg3)
+            speedtest
+        }
+    }
+
+    private var speedtest: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Speed").font(.caption.weight(.semibold)).foregroundStyle(Gruv.yellow)
+                // reserve the phase slot so nothing shifts when it fills in
+                Text(model.speedtesting ? model.speedPhase : " ")
+                    .font(.caption2).foregroundStyle(Gruv.gray)
+                Spacer()
+                if model.ooklaPath != nil { engineToggle }
+            }
+            HStack {
+                speedStat("arrow.down", model.speedDown.isEmpty ? "—" : model.speedDown, Gruv.green)
+                speedStat("arrow.up", model.speedUp.isEmpty ? "—" : model.speedUp, Gruv.aqua)
+                Spacer()
+                Button { model.speedtest() } label: {
+                    HStack(spacing: 5) {
+                        if model.speedtesting { ProgressView().controlSize(.small) }
+                        else { Image(systemName: "gauge.with.dots.needle.67percent") }
+                        Text(model.speedtesting ? "Testing…" : "Run test")
+                    }
+                    .font(.callout.weight(.medium)).foregroundStyle(Gruv.aqua)
+                }
+                .buttonStyle(.plain).disabled(model.speedtesting)
+            }
+        }
+    }
+
+    private var engineToggle: some View {
+        HStack(spacing: 0) {
+            enginePill("Built-in", .builtin)
+            enginePill("Ookla", .ookla)
+        }
+        .background(RoundedRectangle(cornerRadius: 7).fill(Gruv.bg1.opacity(0.7)))
+        .opacity(model.speedtesting ? 0.5 : 1)
+        .disabled(model.speedtesting)
+    }
+
+    private func enginePill(_ label: String, _ engine: SpeedEngine) -> some View {
+        let active = model.speedEngine == engine
+        return Button { model.speedEngine = engine } label: {
+            Text(label)
+                .font(.caption2.weight(.medium))
+                .padding(.vertical, 3).padding(.horizontal, 8)
+                .background(RoundedRectangle(cornerRadius: 6).fill(active ? Gruv.aqua.opacity(0.22) : .clear))
+                .foregroundStyle(active ? Gruv.aqua : Gruv.fg4)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func speedStat(_ icon: String, _ value: String, _ color: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon).font(.caption).foregroundStyle(color)
+            Text(value).font(.callout).foregroundStyle(Gruv.fg1)
         }
     }
 
