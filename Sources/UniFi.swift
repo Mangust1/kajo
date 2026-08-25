@@ -187,7 +187,7 @@ struct UniFiTab: View {
                 header(s)
                 VStack(spacing: 0) {
                     if !s.isp.isEmpty { row("ISP", s.isp) }
-                    row("WAN IP", s.wanIP.isEmpty ? "—" : s.wanIP)
+                    CopyableIPRow(label: "WAN IP", value: s.wanIP.isEmpty ? "—" : s.wanIP)
                     if s.latencyMs >= 0 { row("Latency", "\(s.latencyMs) ms") }
                     row("Throughput", "↓ \(rate(s.rxRate))   ↑ \(rate(s.txRate))")
                     row("Clients", "\(s.clients)" + (s.guests > 0 ? " (+\(s.guests) guest)" : ""))
