@@ -28,22 +28,30 @@ final class NetworkModel: ObservableObject {
     private struct NetCache: Codable {
         var ssid = "—"; var ip = "—"; var lanIP = ""; var publicIP = "…"; var wifiFirst = true
         var activeService = ""; var networks: [WiFiNetwork] = []
+        var speedDown = ""; var speedUp = ""; var speedPing = ""; var speedNet = ""
     }
     private var lastScan = Date.distantPast
+    private var speedNet = ""              // net fingerprint the last speed result was measured on
 
     init() {
         if let data = UserDefaults.standard.data(forKey: "net.cache"),
            let c = try? JSONDecoder().decode(NetCache.self, from: data) {
             ssid = c.ssid; ip = c.ip; lanIP = c.lanIP; publicIP = c.publicIP; wifiFirst = c.wifiFirst
             activeService = c.activeService; networks = c.networks
+            speedDown = c.speedDown; speedUp = c.speedUp; speedPing = c.speedPing; speedNet = c.speedNet
         }
     }
 
     private func saveCache() {
         let c = NetCache(ssid: ssid, ip: ip, lanIP: lanIP, publicIP: publicIP, wifiFirst: wifiFirst,
-                         activeService: activeService, networks: networks)
+                         activeService: activeService, networks: networks,
+                         speedDown: speedDown, speedUp: speedUp, speedPing: speedPing, speedNet: speedNet)
         if let data = try? JSONEncoder().encode(c) { UserDefaults.standard.set(data, forKey: "net.cache") }
     }
+
+    // Identity of the connection a speed result belongs to; if it changes, the
+    // cached result is stale.
+    private var netFingerprint: String { "\(ssid)|\(activeService)" }
 
     @Published var wifiOn = true
     @Published var ssid = "—"
@@ -55,6 +63,7 @@ final class NetworkModel: ObservableObject {
     @Published var working = false
     @Published var networks: [WiFiNetwork] = []
     @Published var scanning = false
+    @Published var showingAll = false // no saved networks in range → listing all
     @Published var connecting = ""    // ssid currently being joined
     @Published var speedtesting = false
     @Published var speedPhase = ""    // "Downloading…" / "Uploading…"
@@ -85,26 +94,32 @@ final class NetworkModel: ObservableObject {
         if !force, !networks.isEmpty, Date().timeIntervalSince(lastScan) < 25 { return }
         scanning = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            var found: [WiFiNetwork] = []
+            var all: [WiFiNetwork] = []
+            var known: [WiFiNetwork] = []
             if let iface = CWWiFiClient.shared().interface() {
-                // Only networks you've set up (preferred / known profiles).
                 let profiles = iface.configuration()?.networkProfiles.array as? [CWNetworkProfile]
-                let known = Set(profiles?.compactMap { $0.ssid } ?? [])
+                let knownSSIDs = Set(profiles?.compactMap { $0.ssid } ?? [])
                 if let set = try? iface.scanForNetworks(withSSID: nil) {
                     var seen = Set<String>()
                     for n in set {
-                        guard let s = n.ssid, !s.isEmpty, known.contains(s), !seen.contains(s) else { continue }
+                        guard let s = n.ssid, !s.isEmpty, !seen.contains(s) else { continue }
                         seen.insert(s)
-                        found.append(WiFiNetwork(id: s, ssid: s, rssi: n.rssiValue,
-                                                 secure: !n.supportsSecurity(.none)))
+                        let net = WiFiNetwork(id: s, ssid: s, rssi: n.rssiValue,
+                                              secure: !n.supportsSecurity(.none))
+                        all.append(net)
+                        if knownSSIDs.contains(s) { known.append(net) }
                     }
                 }
             }
+            // Prefer your saved networks; if none are in range, list everything.
+            var found = known.isEmpty ? all : known
+            let listingAll = known.isEmpty && !all.isEmpty
             found.sort { $0.rssi > $1.rssi }
             DispatchQueue.main.async {
                 self?.scanning = false
                 if !found.isEmpty {                    // don't wipe the cache on a failed/empty scan
                     self?.networks = found
+                    self?.showingAll = listingAll
                     self?.lastScan = Date()
                     self?.saveCache()
                 }
@@ -146,6 +161,10 @@ final class NetworkModel: ObservableObject {
                 self.order = ord
                 self.wifiFirst = ord.first == self.wifiService
                 self.activeService = active
+                // Drop the cached speed result if we're on a different connection now.
+                if !self.speedDown.isEmpty, self.speedNet != self.netFingerprint {
+                    self.speedDown = ""; self.speedUp = ""; self.speedPing = ""; self.speedNet = ""
+                }
                 self.saveCache()
             }
         }
@@ -234,6 +253,7 @@ final class NetworkModel: ObservableObject {
             let ul = mbps(run(["-d"]), "ul_throughput")   // -d: skip download
             DispatchQueue.main.async {
                 self.speedUp = ul; self.speedPhase = ""; self.speedtesting = false
+                self.speedNet = self.netFingerprint; self.saveCache()
             }
         }
     }
@@ -257,7 +277,11 @@ final class NetworkModel: ObservableObject {
         }
         p.terminationHandler = { [weak self] _ in
             h.readabilityHandler = nil
-            DispatchQueue.main.async { self?.speedPhase = ""; self?.speedtesting = false }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.speedPhase = ""; self.speedtesting = false
+                self.speedNet = self.netFingerprint; self.saveCache()
+            }
         }
         do { try p.run() } catch { runBuiltin() }
     }
@@ -482,6 +506,7 @@ struct NetworkTab: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
                 Text("Networks").font(.caption.weight(.semibold)).foregroundStyle(Gruv.yellow)
+                if model.showingAll { Text("all in range").font(.caption2).foregroundStyle(Gruv.gray) }
                 if model.scanning { Text("updating…").font(.caption2).foregroundStyle(Gruv.gray) }
                 Spacer()
                 Button { model.scan(force: true) } label: {
