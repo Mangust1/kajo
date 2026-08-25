@@ -26,19 +26,22 @@ struct WiFiNetwork: Identifiable, Equatable, Codable {
 
 final class NetworkModel: ObservableObject {
     private struct NetCache: Codable {
-        var ssid = "—"; var ip = "—"; var publicIP = "…"; var wifiFirst = true; var networks: [WiFiNetwork] = []
+        var ssid = "—"; var ip = "—"; var publicIP = "…"; var wifiFirst = true
+        var activeService = ""; var networks: [WiFiNetwork] = []
     }
     private var lastScan = Date.distantPast
 
     init() {
         if let data = UserDefaults.standard.data(forKey: "net.cache"),
            let c = try? JSONDecoder().decode(NetCache.self, from: data) {
-            ssid = c.ssid; ip = c.ip; publicIP = c.publicIP; wifiFirst = c.wifiFirst; networks = c.networks
+            ssid = c.ssid; ip = c.ip; publicIP = c.publicIP; wifiFirst = c.wifiFirst
+            activeService = c.activeService; networks = c.networks
         }
     }
 
     private func saveCache() {
-        let c = NetCache(ssid: ssid, ip: ip, publicIP: publicIP, wifiFirst: wifiFirst, networks: networks)
+        let c = NetCache(ssid: ssid, ip: ip, publicIP: publicIP, wifiFirst: wifiFirst,
+                         activeService: activeService, networks: networks)
         if let data = try? JSONEncoder().encode(c) { UserDefaults.standard.set(data, forKey: "net.cache") }
     }
 
@@ -46,6 +49,7 @@ final class NetworkModel: ObservableObject {
     @Published var ssid = "—"
     @Published var ip = "—"
     @Published var publicIP = "…"
+    @Published var activeService = ""   // interface actually carrying the default route now
     @Published var wifiFirst = true
     @Published var working = false
     @Published var networks: [WiFiNetwork] = []
@@ -131,16 +135,42 @@ final class NetworkModel: ObservableObject {
             let ip = (self.sh("/usr/sbin/ipconfig", ["getifaddr", self.dev]) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let ord = self.readOrder()
+            let active = self.primaryService()
             DispatchQueue.main.async {
                 self.wifiOn = on
                 self.ssid = on ? (ssid.isEmpty ? "Not connected" : ssid) : "Off"
                 self.ip = ip.isEmpty ? "—" : ip
                 self.order = ord
                 self.wifiFirst = ord.first == self.wifiService
+                self.activeService = active
                 self.saveCache()
             }
         }
         fetchPublicIP()
+    }
+
+    // Interface actually carrying the default route right now, mapped to its
+    // service name (e.g. "Wi-Fi", "Thunderbolt Ethernet Slot 1"). This is the
+    // *real* primary — it can differ from the Wi-Fi first/last preference.
+    private func primaryService() -> String {
+        let out = sh("/sbin/route", ["-n", "get", "default"]) ?? ""
+        var iface = ""
+        for line in out.split(separator: "\n") {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("interface:") {
+                iface = String(t.dropFirst("interface:".count)).trimmingCharacters(in: .whitespaces)
+                break
+            }
+        }
+        guard !iface.isEmpty else { return "" }
+        let order = sh("/usr/sbin/networksetup", ["-listnetworkserviceorder"]) ?? ""
+        for line in order.split(separator: "\n") where line.contains("Device: \(iface))") {
+            if let r = line.range(of: "Hardware Port: "),
+               let c = line.range(of: ", Device:", range: r.upperBound..<line.endIndex) {
+                return String(line[r.upperBound..<c.lowerBound])
+            }
+        }
+        return iface
     }
 
     private func fetchPublicIP() {
@@ -318,7 +348,7 @@ struct NetworkTab: View {
                             .labelsHidden().toggleStyle(.switch).tint(Gruv.green)
                     }
 
-                    CopyableIPRow(label: "Local IP", value: model.ip)
+                    CopyableIPRow(label: "Wi-Fi IP", value: model.ip)
                     CopyableIPRow(label: "Public IP", value: model.publicIP)
 
                     priority
@@ -403,6 +433,16 @@ struct NetworkTab: View {
     private var priority: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Priority").font(.caption.weight(.semibold)).foregroundStyle(Gruv.yellow)
+            if !model.activeService.isEmpty {
+                let wifiActive = model.activeService == "Wi-Fi"
+                let matches = model.wifiFirst == wifiActive   // actual vs. wished
+                HStack(spacing: 5) {
+                    Image(systemName: matches ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                    Text("Active now: \(model.activeService)").font(.caption).lineLimit(1)
+                }
+                .foregroundStyle(matches ? Gruv.green : Gruv.yellow)
+            }
             Text(model.wifiFirst ? "Wi-Fi preferred over Ethernet"
                                  : "Ethernet preferred over Wi-Fi")
                 .font(.caption).foregroundStyle(Gruv.gray)
