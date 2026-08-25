@@ -26,7 +26,7 @@ struct WiFiNetwork: Identifiable, Equatable, Codable {
 
 final class NetworkModel: ObservableObject {
     private struct NetCache: Codable {
-        var ssid = "—"; var ip = "—"; var publicIP = "…"; var wifiFirst = true
+        var ssid = "—"; var ip = "—"; var lanIP = ""; var publicIP = "…"; var wifiFirst = true
         var activeService = ""; var networks: [WiFiNetwork] = []
     }
     private var lastScan = Date.distantPast
@@ -34,20 +34,21 @@ final class NetworkModel: ObservableObject {
     init() {
         if let data = UserDefaults.standard.data(forKey: "net.cache"),
            let c = try? JSONDecoder().decode(NetCache.self, from: data) {
-            ssid = c.ssid; ip = c.ip; publicIP = c.publicIP; wifiFirst = c.wifiFirst
+            ssid = c.ssid; ip = c.ip; lanIP = c.lanIP; publicIP = c.publicIP; wifiFirst = c.wifiFirst
             activeService = c.activeService; networks = c.networks
         }
     }
 
     private func saveCache() {
-        let c = NetCache(ssid: ssid, ip: ip, publicIP: publicIP, wifiFirst: wifiFirst,
+        let c = NetCache(ssid: ssid, ip: ip, lanIP: lanIP, publicIP: publicIP, wifiFirst: wifiFirst,
                          activeService: activeService, networks: networks)
         if let data = try? JSONEncoder().encode(c) { UserDefaults.standard.set(data, forKey: "net.cache") }
     }
 
     @Published var wifiOn = true
     @Published var ssid = "—"
-    @Published var ip = "—"
+    @Published var ip = "—"             // Wi-Fi (en0) local IP
+    @Published var lanIP = ""           // wired/Ethernet local IP ("" = no wired link)
     @Published var publicIP = "…"
     @Published var activeService = ""   // interface actually carrying the default route now
     @Published var wifiFirst = true
@@ -136,10 +137,12 @@ final class NetworkModel: ObservableObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let ord = self.readOrder()
             let active = self.primaryService()
+            let lan = self.wiredIP()
             DispatchQueue.main.async {
                 self.wifiOn = on
                 self.ssid = on ? (ssid.isEmpty ? "Not connected" : ssid) : "Off"
                 self.ip = ip.isEmpty ? "—" : ip
+                self.lanIP = lan
                 self.order = ord
                 self.wifiFirst = ord.first == self.wifiService
                 self.activeService = active
@@ -171,6 +174,23 @@ final class NetworkModel: ObservableObject {
             }
         }
         return iface
+    }
+
+    // Local IP of the first wired (non-Wi-Fi) service that has an address.
+    // "" when nothing is plugged in.
+    private func wiredIP() -> String {
+        let order = sh("/usr/sbin/networksetup", ["-listnetworkserviceorder"]) ?? ""
+        for line in order.split(separator: "\n") {
+            guard line.contains("Hardware Port:"), !line.contains("Wi-Fi"),
+                  let r = line.range(of: "Device: "),
+                  let end = line.range(of: ")", range: r.upperBound..<line.endIndex) else { continue }
+            let iface = String(line[r.upperBound..<end.lowerBound])
+            if iface.isEmpty || iface == dev { continue }
+            let ip = (sh("/usr/sbin/ipconfig", ["getifaddr", iface]) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !ip.isEmpty { return ip }
+        }
+        return ""
     }
 
     private func fetchPublicIP() {
@@ -349,6 +369,9 @@ struct NetworkTab: View {
                     }
 
                     CopyableIPRow(label: "Wi-Fi IP", value: model.ip)
+                    if !model.lanIP.isEmpty {
+                        CopyableIPRow(label: "LAN IP", value: model.lanIP)
+                    }
                     CopyableIPRow(label: "Public IP", value: model.publicIP)
 
                     priority
