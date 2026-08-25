@@ -300,8 +300,8 @@ struct NetworkTab: View {
                             .labelsHidden().toggleStyle(.switch).tint(Gruv.green)
                     }
 
-                    row("Local IP", model.ip)
-                    row("Public IP", model.publicIP)
+                    CopyableIPRow(label: "Local IP", value: model.ip)
+                    CopyableIPRow(label: "Public IP", value: model.publicIP)
 
                     priority
                     if model.wifiOn { networksList }
@@ -469,5 +469,36 @@ struct NetworkTab: View {
                 .foregroundStyle(active ? Gruv.aqua : Gruv.fg2)
         }
         .buttonStyle(.plain)
+    }
+}
+
+// IP row with a click-to-copy button (checkmark flashes on copy).
+struct CopyableIPRow: View {
+    let label: String
+    let value: String
+    @State private var copied = false
+
+    var body: some View {
+        HStack {
+            Text(label).foregroundStyle(Gruv.fg4)
+            Spacer()
+            Text(value).foregroundStyle(Gruv.fg1)
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(value, forType: .string)
+                copied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { copied = false }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.caption)
+                    .foregroundStyle(copied ? Gruv.green : Gruv.fg4)
+                    .frame(width: 16)
+            }
+            .buttonStyle(.plain)
+            .disabled(value == "—" || value == "…" || value.isEmpty)
+        }
+        .font(.callout)
+        .padding(.vertical, 9)
+        .overlay(Rectangle().fill(Gruv.bg3.opacity(0.3)).frame(height: 1), alignment: .bottom)
     }
 }
