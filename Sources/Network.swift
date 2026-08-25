@@ -61,6 +61,14 @@ final class NetworkModel: ObservableObject {
         .first { FileManager.default.isExecutableFile(atPath: $0) }
     @Published var speedDown = ""     // "123 Mbps"
     @Published var speedUp = ""
+    @Published var speedPing = ""     // "22 ms"
+
+    // Labeled multi-line summary for the clipboard.
+    var speedSummary: String {
+        let engine = speedEngine == .ookla ? "Ookla speed test" : "Apple speed test"
+        func v(_ s: String) -> String { s.isEmpty ? "—" : s }
+        return "\(engine)\ndown: \(v(speedDown))  up: \(v(speedUp))  ping: \(v(speedPing))"
+    }
 
     private let dev = "en0"           // Wi-Fi interface on this Mac
     private let wifiService = "Wi-Fi" // service name in the order list
@@ -149,7 +157,7 @@ final class NetworkModel: ObservableObject {
 
     func speedtest() {
         guard !speedtesting else { return }
-        speedtesting = true; speedDown = ""; speedUp = ""; speedPhase = ""
+        speedtesting = true; speedDown = ""; speedUp = ""; speedPing = ""; speedPhase = ""
         if speedEngine == .ookla, ooklaPath != nil { runOokla() } else { runBuiltin() }
     }
 
@@ -158,18 +166,22 @@ final class NetworkModel: ObservableObject {
     private func runBuiltin() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            func mbps(_ args: [String], _ key: String) -> String {
+            func run(_ args: [String]) -> [String: Any]? {
                 let out = self.sh("/usr/bin/networkQuality", ["-c"] + args) ?? ""
-                let json = out.data(using: .utf8).flatMap {
+                return out.data(using: .utf8).flatMap {
                     try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
                 }
+            }
+            func mbps(_ json: [String: Any]?, _ key: String) -> String {
                 guard let bps = json?[key] as? Double else { return "—" }
                 return String(format: "%.0f Mbps", bps / 1_000_000)
             }
             DispatchQueue.main.async { self.speedPhase = "Downloading…" }
-            let dl = mbps(["-u"], "dl_throughput")   // -u: skip upload
-            DispatchQueue.main.async { self.speedDown = dl; self.speedPhase = "Uploading…" }
-            let ul = mbps(["-d"], "ul_throughput")   // -d: skip download
+            let dlJson = run(["-u"])                  // -u: skip upload
+            let dl = mbps(dlJson, "dl_throughput")
+            let ping = (dlJson?["base_rtt"] as? Double).map { String(format: "%.0f ms", $0) } ?? "—"
+            DispatchQueue.main.async { self.speedDown = dl; self.speedPing = ping; self.speedPhase = "Uploading…" }
+            let ul = mbps(run(["-d"]), "ul_throughput")   // -d: skip download
             DispatchQueue.main.async {
                 self.speedUp = ul; self.speedPhase = ""; self.speedtesting = false
             }
@@ -207,11 +219,16 @@ final class NetworkModel: ObservableObject {
             guard let d = obj[key] as? [String: Any], let bw = d["bandwidth"] as? Double else { return nil }
             return String(format: "%.0f Mbps", bw * 8 / 1_000_000)
         }
+        func ping() -> String? {
+            guard let d = obj["ping"] as? [String: Any], let lat = d["latency"] as? Double else { return nil }
+            return String(format: "%.0f ms", lat)
+        }
         DispatchQueue.main.async {
             switch type {
+            case "ping":     self.speedPhase = "Latency…";     ping().map { self.speedPing = $0 }
             case "download": self.speedPhase = "Downloading…"; mbps("download").map { self.speedDown = $0 }
             case "upload":   self.speedPhase = "Uploading…";   mbps("upload").map { self.speedUp = $0 }
-            case "result":   mbps("download").map { self.speedDown = $0 }; mbps("upload").map { self.speedUp = $0 }
+            case "result":   mbps("download").map { self.speedDown = $0 }; mbps("upload").map { self.speedUp = $0 }; ping().map { self.speedPing = $0 }
             default: break
             }
         }
@@ -281,6 +298,7 @@ struct NetworkTab: View {
     @ObservedObject var model: NetworkModel
     @State private var selected = ""     // ssid awaiting password
     @State private var password = ""
+    @State private var speedCopied = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -327,6 +345,18 @@ struct NetworkTab: View {
             HStack {
                 speedStat("arrow.down", model.speedDown.isEmpty ? "—" : model.speedDown, Gruv.green)
                 speedStat("arrow.up", model.speedUp.isEmpty ? "—" : model.speedUp, Gruv.aqua)
+                if !model.speedDown.isEmpty {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(model.speedSummary, forType: .string)
+                        speedCopied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { speedCopied = false }
+                    } label: {
+                        Image(systemName: speedCopied ? "checkmark" : "doc.on.doc")
+                            .font(.caption).foregroundStyle(speedCopied ? Gruv.green : Gruv.fg4)
+                    }
+                    .buttonStyle(.plain).help("Copy results")
+                }
                 Spacer()
                 Button { model.speedtest() } label: {
                     HStack(spacing: 5) {
