@@ -56,8 +56,13 @@ func cleanedURL(_ raw: String) -> String? {
     // Goodreads: search/referral context on /book/show/ links. The path (ID.Title) is the whole link.
     else if host.contains("goodreads.com") { hostJunk = ["from_search", "from_srp", "qid", "rank", "ac", "from_choice"] }
 
+    // Reddit: post/comment permalinks work path-only — every query param is share/
+    // tracking/JS-challenge junk (utm_, share_id, %ref, solution, token, js_challenge,
+    // jsc_orig_r…). Drop the whole query rather than chase the list.
+    let stripAllQuery = host.contains("reddit.com") || host == "redd.it"
+
     // percentEncodedQueryItems (not queryItems) so kept values stay byte-identical.
-    let kept = (comps.percentEncodedQueryItems ?? []).filter { item in
+    let kept = stripAllQuery ? [] : (comps.percentEncodedQueryItems ?? []).filter { item in
         let n = item.name.lowercased()
         // ponytail: list=RD… is an auto-generated radio mix, not a saved playlist — drop it
         if n == "list", (item.value ?? "").hasPrefix("RD"),
@@ -66,6 +71,13 @@ func cleanedURL(_ raw: String) -> String? {
             && !junkPrefixes.contains { n.hasPrefix($0) }
     }
     comps.percentEncodedQueryItems = kept.isEmpty ? nil : kept
+
+    // Known tracking fragments: Echobox social-scheduler tags (#Echobox=…),
+    // AT-Internet (#xtor=…). Leave real anchors / text-fragments (#:~:text) alone.
+    if let frag = comps.fragment {
+        let key = frag.split(separator: "=").first.map(String.init)?.lowercased() ?? ""
+        if key == "echobox" || key == "xtor" { comps.fragment = nil }
+    }
     return comps.string
 }
 
