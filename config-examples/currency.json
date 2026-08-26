@@ -1,0 +1,8 @@
+{
+  "currencies": [
+    {"code": "EUR", "flag": "🇪🇺"},
+    {"code": "USD", "flag": "🇺🇸"},
+    {"code": "GBP", "flag": "🇬🇧"},
+    {"code": "JPY", "flag": "🇯🇵"}
+  ]
+}

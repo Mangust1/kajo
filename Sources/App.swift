@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelega
             menu.addItem(mi)
         }
         menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "Quit Kajo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         item.menu = menu
         statusItem = item
@@ -61,6 +62,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelega
         guard let tab = sender.representedObject as? Tab else { return }
         controller.toggle(tab: tab)
     }
+
+    @objc private func openSettings() { ConfigWindowController.shared.show() }
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {}
 

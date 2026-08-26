@@ -16,14 +16,30 @@ import QuartzCore            // CADisplayLink — vsync-synced panel animation
 // MARK: - Currency converter
 
 struct Ccy { let code: String; let flag: String }
-// Add currencies here — this array is the single source of truth (API request,
-// rate table, field rows, Tab/Shift-Tab wrap all derive from it). Only constraint:
-// the code must be in the ECB reference set Frankfurter serves (USD, GBP, JPY,
-// SGD, CNY, AUD, SEK, NOK, CHF, … — EUR is always the base). Keep EUR first.
-let currencies = [Ccy(code: "EUR", flag: "🇪🇺"),
-                  Ccy(code: "GBP", flag: "🇬🇧"),
-                  Ccy(code: "THB", flag: "🇹🇭"),
-                  Ccy(code: "MYR", flag: "🇲🇾")]
+
+// The single source of truth (API request, rate table, field rows, Tab/Shift-Tab
+// wrap all derive from it). Loaded from currency.json { "currencies": [{code,flag}…] };
+// falls back to sane defaults. Only constraint: codes must be in the ECB set
+// Frankfurter serves (USD, GBP, JPY, SGD, CNY, AUD, SEK, NOK, CHF, THB, MYR, …).
+// EUR is the base and is forced first regardless of config order.
+let currencies: [Ccy] = {
+    let defaults = [Ccy(code: "EUR", flag: "🇪🇺"), Ccy(code: "GBP", flag: "🇬🇧"),
+                    Ccy(code: "THB", flag: "🇹🇭"), Ccy(code: "MYR", flag: "🇲🇾")]
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: kajoConfigDir + "/currency.json")),
+          let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let arr = j["currencies"] as? [[String: Any]] else { return defaults }
+    var list = arr.compactMap { d -> Ccy? in
+        guard let code = (d["code"] as? String)?.uppercased(), !code.isEmpty else { return nil }
+        return Ccy(code: code, flag: d["flag"] as? String ?? "")
+    }
+    guard !list.isEmpty else { return defaults }
+    if let i = list.firstIndex(where: { $0.code == "EUR" }) {           // move EUR to front
+        if i != 0 { list.insert(list.remove(at: i), at: 0) }
+    } else {
+        list.insert(Ccy(code: "EUR", flag: "🇪🇺"), at: 0)                // EUR is the base — always present
+    }
+    return list
+}()
 
 final class CurrencyModel: ObservableObject {
     @Published var rates: [String: Double] = ["EUR": 1]   // units per 1 EUR

@@ -8,10 +8,10 @@ A Noctalia-inspired drop-down control center for macOS: **one translucent, Gruvb
 
 15 tabs. Some work for anyone; some expect the author's home-lab and just show a "No config" hint until you point them at your own services:
 
-- **Universal:** Calendar (world clocks + weather + events), Timer, Now Playing (Spotify), Sound (output/input + Bluetooth audio battery levels — AirPods L/R/case), Power, Network (Wi-Fi scan/join, service priority, copy-able local/public IP, and a speed test — built-in `networkQuality` or live-streaming Ookla `speedtest`), System, Memes, Clipboard (with a URL tracking cleaner — strips tracking params + Echobox/xtor fragments, `kajo://clip/clean` — and send-to-Android via KDE Connect), Currency (live EUR/GBP/THB/MYR converter via ECB rates, no API key).
+- **Universal:** Calendar (world clocks + weather + events), Timer, Now Playing (Spotify), Sound (output/input + Bluetooth audio battery levels — AirPods L/R/case), Power, Network (Wi-Fi scan/join, service priority, copy-able local/public IP, and a speed test — built-in `networkQuality` or live-streaming Ookla `speedtest`), System (Keep Awake with optional timer + Empty Trash + a Settings button), Memes, Clipboard (with a URL tracking cleaner — strips tracking params + Echobox/xtor fragments, `kajo://clip/clean` — and send-to-Android via KDE Connect), Currency (configurable multi-currency converter via ECB rates, no API key).
 - **Needs your own backend (optional):** UniFi, Home (Home Assistant), Pi (a small health container), VPN, AI (a local oMLX server).
 
-> ⚠️ It's a personal tool, not a polished product. It has a **built-in menu-bar icon** (plus `kajo://tab/<name>` URLs) to summon the panel, and reads optional per-module config from `~/.config/kajo/` (see `config-examples/`). Getting it running on a fresh Mac still means building it and sorting out code-signing. The prompt below hands all of that to Claude Code.
+> ⚠️ It's a personal tool, not a polished product. It has a **built-in menu-bar icon** (plus `kajo://tab/<name>` URLs) to summon the panel, and reads optional per-module config from `~/.config/kajo/` — editable in a built-in **Settings window** (menu-bar → *Settings…*, the System tab's Settings button, or `kajo://config`) with typed forms *and* a raw-JSON view per file, or by hand (see `config-examples/`). Getting it running on a fresh Mac still means building it and sorting out code-signing — `./install.sh` (below) or the Claude Code prompt handles that.
 
 ## Screenshots
 
@@ -98,9 +98,14 @@ have the author's home-lab.
 ```sh
 # 1. build (see signing note below) and install
 make install
+# …or let the installer handle prereqs + signing for you:
+./install.sh                    # --self-signed for persistent TCC, --adhoc for simplest
 
 # 2. summon a tab
 open "kajo://tab/calendar"      # or music, sound, power, network, timer, system…
+
+# 3. configure (optional) — GUI editor for ~/.config/kajo/*.json
+open "kajo://config"            # or the menu-bar Settings… item
 ```
 
 - **Signing:** the Makefile signs with `SIGN_ID := Kajo Self-Signed`. Create your own cert by that name, or set `SIGN_ID := -` for ad-hoc signing.
@@ -110,4 +115,4 @@ open "kajo://tab/calendar"      # or music, sound, power, network, timer, system
 
 ## Status
 
-v0.22 — 15 working tabs, quake-style slide animation, code-signed (TCC persists), UniFi/Network/Pi cached for instant open. Network tab gained a speed test (built-in `networkQuality` or live Ookla `speedtest`). Source split per-tab across `Sources/*.swift` (main.swift = bootstrap only).
+v0.23 — 15 working tabs, quake-style slide animation, code-signed (TCC persists), UniFi/Network/Pi cached for instant open. New: a **Settings window** (`ConfigWindow.swift` — translucent, per-file typed forms ⇄ raw JSON, templates, validity check, Relaunch), the System tab's **Keep Awake timer** (15m–4h presets with live countdown), Currency is now **config-driven** (`currency.json`), and an **`install.sh`** that automates prereqs + signing. Source split per-tab across `Sources/*.swift` (main.swift = bootstrap only).
