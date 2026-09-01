@@ -40,6 +40,7 @@ struct PanelView: View {
     @ObservedObject var memes: MemeLibrary
     @ObservedObject var clipboard: ClipboardModel
     @ObservedObject var currency: CurrencyModel
+    @ObservedObject var hours: HoursModel
 
     var body: some View {
         HStack(spacing: 0) {
@@ -89,6 +90,7 @@ struct PanelView: View {
                 case .memes:    MemesTab(model: memes)
                 case .clipboard: ClipboardTab(model: clipboard)
                 case .currency: CurrencyTab(model: currency)
+                case .hours:    HoursTab(model: hours)
                 }
             }
             .padding(.horizontal, 18)
@@ -146,6 +148,7 @@ final class FloatingPanel: NSPanel {
 // MARK: - Panel controller
 
 final class PanelController {
+    static weak var shared: PanelController?
     let state = PanelState()
     let weather = WeatherModel()
     let events = EventsModel()
@@ -164,6 +167,7 @@ final class PanelController {
     let memes = MemeLibrary()
     let clipboard = ClipboardModel()
     let currency = CurrencyModel()
+    let hours = HoursModel()
     private let panel: FloatingPanel
     private var clickMonitor: Any?
     private var keyMonitor: Any?
@@ -182,7 +186,7 @@ final class PanelController {
         visual.layer?.masksToBounds = true
         visual.frame = NSRect(origin: .zero, size: size)
 
-        let hosting = NSHostingView(rootView: PanelView(state: state, weather: weather, events: events, timer: timer, nowPlaying: nowPlaying, sound: sound, bluetooth: bluetooth, power: power, network: network, unifi: unifi, vpn: vpn, ha: ha, pi: pi, ai: ai, system: system, memes: memes, clipboard: clipboard, currency: currency))
+        let hosting = NSHostingView(rootView: PanelView(state: state, weather: weather, events: events, timer: timer, nowPlaying: nowPlaying, sound: sound, bluetooth: bluetooth, power: power, network: network, unifi: unifi, vpn: vpn, ha: ha, pi: pi, ai: ai, system: system, memes: memes, clipboard: clipboard, currency: currency, hours: hours))
         hosting.frame = visual.bounds
         hosting.autoresizingMask = [.width, .height]
         visual.addSubview(hosting)
@@ -190,6 +194,7 @@ final class PanelController {
         panel = FloatingPanel(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.nonactivatingPanel, .borderless],
                               backing: .buffered, defer: false)
+        PanelController.shared = self
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.backgroundColor = .clear
@@ -304,6 +309,8 @@ final class PanelController {
         installMonitors()
         updatePolling(forTab: state.tab)
     }
+
+    func closePanel() { hide() }
 
     private func hide() {
         removeMonitors()

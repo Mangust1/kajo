@@ -1,0 +1,364 @@
+import AppKit
+import SwiftUI
+
+// MARK: - Work-hour tracking: stopwatch + logged entries + monthly Severa export
+
+struct TimeEntry: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var task: String
+    var start: Date
+    var end: Date?                    // nil = currently running
+    var seconds: TimeInterval { max(0, (end ?? Date()).timeIntervalSince(start)) }
+}
+
+private let hoursDayFmt: DateFormatter    = { let f = DateFormatter(); f.dateFormat = "d.M."; return f }()
+private let hoursDayHdrFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "EEE d.M."; f.locale = Locale(identifier: "en_US"); return f }()
+private let hoursMonthFmt: DateFormatter  = { let f = DateFormatter(); f.dateFormat = "LLLL yyyy"; f.locale = Locale(identifier: "en_US"); return f }()
+private let hoursTimeFmt: DateFormatter   = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f }()
+
+private func decimalHours(_ s: TimeInterval) -> String {
+    let h = (s / 3600 * 100).rounded() / 100
+    var str = String(format: "%.2f", h)
+    while str.hasSuffix("0") { str.removeLast() }
+    if str.hasSuffix(".") { str.removeLast() }
+    return str.isEmpty ? "0" : str
+}
+private func durText(_ s: TimeInterval, seconds: Bool = false) -> String {
+    let t = Int(s), h = t / 3600, m = (t % 3600) / 60, sec = t % 60
+    if h > 0 { return seconds ? "\(h)h \(m)m \(sec)s" : "\(h)h \(m)m" }
+    if m > 0 { return seconds ? "\(m)m \(sec)s" : "\(m)m" }
+    return "\(sec)s"
+}
+
+final class HoursModel: ObservableObject {
+    @Published var entries: [TimeEntry] = []
+    @Published var draft = ""
+    @Published private(set) var tick = Date()               // drives the live elapsed readout
+    @Published var month = HoursModel.monthStart(Date())    // month shown in the log
+
+    private let url = URL(fileURLWithPath: kajoConfigDir + "/hours.json")
+    private var ticker: Timer?
+
+    var running: TimeEntry? { entries.first { $0.end == nil } }
+
+    init() {
+        try? FileManager.default.createDirectory(atPath: kajoConfigDir, withIntermediateDirectories: true)
+        load()
+        if running != nil { startTicker() }
+    }
+
+    static func monthStart(_ d: Date) -> Date {
+        Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: d)) ?? d
+    }
+
+    // MARK: start / stop / resume
+    func start(task: String? = nil) {
+        guard running == nil else { return }
+        let name = (task ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
+        entries.insert(TimeEntry(task: name.isEmpty ? "Untitled" : name, start: Date(), end: nil), at: 0)
+        draft = ""
+        save(); startTicker()
+    }
+    func stop() {
+        guard let i = entries.firstIndex(where: { $0.end == nil }) else { return }
+        entries[i].end = Date()
+        if entries[i].seconds < 1 { entries.remove(at: i) }   // discard accidental taps
+        save(); stopTicker()
+    }
+    func resume(_ e: TimeEntry) { stop(); start(task: e.task) }
+
+    // MARK: edit / delete / add
+    func update(_ e: TimeEntry) {
+        guard let i = entries.firstIndex(where: { $0.id == e.id }) else { return }
+        entries[i] = e; save()
+    }
+    func delete(_ e: TimeEntry) {
+        entries.removeAll { $0.id == e.id }
+        if running == nil { stopTicker() }
+        save()
+    }
+    @discardableResult func addManual() -> TimeEntry {
+        // default: a 1-hour block ending now (or noon on the last day of the viewed month)
+        let cal = Calendar.current
+        let anchor: Date = cal.isDate(Date(), equalTo: month, toGranularity: .month)
+            ? Date()
+            : (cal.date(byAdding: .month, value: 1, to: month)?.addingTimeInterval(-43200) ?? month)
+        let e = TimeEntry(task: "", start: anchor.addingTimeInterval(-3600), end: anchor)
+        entries.append(e); save()
+        return e
+    }
+
+    // MARK: month view
+    func shiftMonth(_ d: Int) { month = Calendar.current.date(byAdding: .month, value: d, to: month) ?? month }
+    private func inMonth(_ e: TimeEntry) -> Bool { Calendar.current.isDate(e.start, equalTo: month, toGranularity: .month) }
+    func monthSeconds() -> TimeInterval { entries.filter(inMonth).reduce(0) { $0 + $1.seconds } }
+    func daySeconds(_ day: Date) -> TimeInterval {
+        entries.filter { Calendar.current.isDate($0.start, inSameDayAs: day) }.reduce(0) { $0 + $1.seconds }
+    }
+    // completed entries in the viewed month, grouped by day (newest day first); running one lives in the card
+    func days() -> [(day: Date, items: [TimeEntry])] {
+        let logged = entries.filter { $0.end != nil && inMonth($0) }
+        let groups = Dictionary(grouping: logged) { Calendar.current.startOfDay(for: $0.start) }
+        return groups.keys.sorted(by: >).map { (day: $0, items: groups[$0]!.sorted { $0.start > $1.start }) }
+    }
+
+    // MARK: export (chronological per-entry list for Severa)
+    func exportMonth() -> String {
+        let rows = entries.filter { $0.end != nil && inMonth($0) }.sorted { $0.start < $1.start }
+        var out = hoursMonthFmt.string(from: month) + "\n\n"
+        for e in rows {
+            out += "\(hoursDayFmt.string(from: e.start))  \(e.task.isEmpty ? "—" : e.task) — \(decimalHours(e.seconds)) h\n"
+        }
+        let total = rows.reduce(0.0) { $0 + $1.seconds }
+        out += "\nTotal: \(decimalHours(total)) h\n"
+        return out
+    }
+    func copyMonth() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(exportMonth(), forType: .string)
+    }
+
+    // MARK: ticker + persistence
+    private func startTicker() {
+        ticker?.invalidate()
+        ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick = Date() }
+    }
+    private func stopTicker() { ticker?.invalidate(); ticker = nil }
+
+    private func load() {
+        guard let d = try? Data(contentsOf: url),
+              let a = try? JSONDecoder().decode([TimeEntry].self, from: d) else { return }
+        entries = a.sorted { $0.start > $1.start }
+    }
+    private func save() {
+        entries.sort { $0.start > $1.start }
+        if let d = try? JSONEncoder().encode(entries) { try? d.write(to: url) }
+    }
+}
+
+struct HoursTab: View {
+    @ObservedObject var model: HoursModel
+    @State private var editingID: UUID?
+    @State private var copiedID: UUID?
+    @State private var draftEntry = TimeEntry(task: "", start: Date(), end: Date())
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            tracker
+            monthBar
+            log
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    // running / start card
+    private var tracker: some View {
+        Group {
+            if let r = model.running {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(r.task).foregroundColor(Gruv.fg1).lineLimit(1)
+                        Text(durText(model.tick.timeIntervalSince(r.start), seconds: true))
+                            .font(.system(size: 20, weight: .semibold, design: .monospaced))
+                            .foregroundColor(Gruv.green)
+                    }
+                    Spacer()
+                    Button { model.stop() } label: {
+                        Image(systemName: "stop.circle.fill").font(.system(size: 30)).foregroundColor(Gruv.red)
+                    }.buttonStyle(.plain).help("Stop")
+                }
+                .padding(12).background(Gruv.bg1).cornerRadius(10)
+            } else {
+                HStack(spacing: 10) {
+                    TextField("What are you working on?", text: $model.draft)
+                        .textFieldStyle(.plain).foregroundColor(Gruv.fg1)
+                        .onSubmit { model.start() }
+                    Button { model.start() } label: {
+                        Image(systemName: "play.circle.fill").font(.system(size: 30)).foregroundColor(Gruv.green)
+                    }.buttonStyle(.plain).help("Start")
+                }
+                .padding(12).background(Gruv.bg1).cornerRadius(10)
+            }
+        }
+    }
+
+    private var monthBar: some View {
+        HStack(spacing: 6) {
+            Button { model.shiftMonth(-1) } label: { Image(systemName: "chevron.left") }.buttonStyle(.plain).foregroundColor(Gruv.fg4)
+            Text(hoursMonthFmt.string(from: model.month)).font(.system(size: 12, weight: .semibold)).foregroundColor(Gruv.fg2)
+            Button { model.shiftMonth(1) } label: { Image(systemName: "chevron.right") }.buttonStyle(.plain).foregroundColor(Gruv.fg4)
+            Spacer()
+            Text(durText(model.monthSeconds())).font(.system(size: 12, weight: .semibold)).foregroundColor(Gruv.yellow)
+            Button { PanelController.shared?.closePanel(); HoursWindowController.shared.show(model: model) } label: { Image(systemName: "macwindow") }
+                .buttonStyle(.plain).foregroundColor(Gruv.fg2).help("Open in a window (park it next to your browser)")
+            Button { model.copyMonth() } label: { Image(systemName: "doc.on.doc") }
+                .buttonStyle(.plain).foregroundColor(Gruv.fg2).help("Copy month for Severa")
+            Button { let e = model.addManual(); draftEntry = e; editingID = e.id } label: { Image(systemName: "plus") }
+                .buttonStyle(.plain).foregroundColor(Gruv.green).help("Add entry manually")
+        }
+    }
+
+    private var log: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                let days = model.days()
+                if days.isEmpty {
+                    Text("No entries this month").foregroundColor(Gruv.fg4).font(.system(size: 12)).padding(.top, 24)
+                }
+                ForEach(days, id: \.day) { grp in
+                    HStack {
+                        Text(hoursDayHdrFmt.string(from: grp.day)).font(.system(size: 11, weight: .semibold)).foregroundColor(Gruv.fg4)
+                        Spacer()
+                        Text(durText(model.daySeconds(grp.day))).font(.system(size: 11)).foregroundColor(Gruv.fg4)
+                    }
+                    .padding(.top, 4)
+                    ForEach(grp.items) { e in
+                        if editingID == e.id { editor(e) } else { row(e) }
+                    }
+                }
+            }
+            .padding(.bottom, 8)
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    private func row(_ e: TimeEntry) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(e.task.isEmpty ? "—" : e.task).foregroundColor(Gruv.fg1).lineLimit(1)
+                Text("\(hoursTimeFmt.string(from: e.start))–\(e.end.map { hoursTimeFmt.string(from: $0) } ?? "…")")
+                    .font(.system(size: 10)).foregroundColor(Gruv.fg4)
+            }
+            Spacer()
+            Text(durText(e.seconds)).font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundColor(Gruv.fg2)
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(e.task, forType: .string)
+                copiedID = e.id
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if copiedID == e.id { copiedID = nil } }
+            } label: {
+                Image(systemName: copiedID == e.id ? "checkmark" : "doc.on.doc")
+                    .foregroundColor(copiedID == e.id ? Gruv.green : Gruv.fg4)
+            }.buttonStyle(.plain).help("Copy task text")
+            Button { model.resume(e) } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(.plain).foregroundColor(Gruv.blue).help("Resume this task")
+        }
+        .padding(10).background(Gruv.bg1).cornerRadius(8)
+        .contentShape(Rectangle())
+        .onTapGesture { draftEntry = e; editingID = e.id }
+    }
+
+    private func editor(_ e: TimeEntry) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Task", text: $draftEntry.task)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { model.update(draftEntry); editingID = nil }
+            DatePicker("Start", selection: $draftEntry.start).datePickerStyle(.field).font(.system(size: 12))
+            if draftEntry.end != nil {
+                DatePicker("End", selection: Binding(get: { draftEntry.end ?? Date() }, set: { draftEntry.end = $0 }))
+                    .datePickerStyle(.field).font(.system(size: 12))
+            } else {
+                Text("running…").font(.system(size: 11)).foregroundColor(Gruv.green)
+            }
+            HStack {
+                Button { model.delete(e); editingID = nil } label: { Image(systemName: "trash").foregroundColor(Gruv.red) }
+                    .buttonStyle(.plain).help("Delete")
+                Spacer()
+                Button("Cancel") { editingID = nil }.buttonStyle(.plain).foregroundColor(Gruv.fg4)
+                Button("Save") { model.update(draftEntry); editingID = nil }.buttonStyle(.plain).foregroundColor(Gruv.green)
+            }
+        }
+        .padding(10).background(Gruv.bg1)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Gruv.green.opacity(0.5), lineWidth: 1))
+        .cornerRadius(8)
+    }
+}
+
+// MARK: - Detached window — park the month's log next to the browser while filling Severa
+
+struct HoursWindow: View {
+    @ObservedObject var model: HoursModel
+    @State private var copiedID: UUID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Button { model.shiftMonth(-1) } label: { Image(systemName: "chevron.left") }.buttonStyle(.plain).foregroundColor(Gruv.fg4)
+                Text(hoursMonthFmt.string(from: model.month)).font(.system(size: 15, weight: .bold)).foregroundColor(Gruv.fg0)
+                Button { model.shiftMonth(1) } label: { Image(systemName: "chevron.right") }.buttonStyle(.plain).foregroundColor(Gruv.fg4)
+                Spacer()
+                Text("Total \(durText(model.monthSeconds()))").font(.system(size: 13, weight: .semibold)).foregroundColor(Gruv.yellow)
+                Button { model.copyMonth() } label: { Label("Copy", systemImage: "doc.on.doc").font(.system(size: 12)) }
+                    .buttonStyle(.plain).foregroundColor(Gruv.fg2).help("Copy month for Severa")
+            }
+            Divider().overlay(Gruv.bg3)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 5) {
+                    let days = model.days()
+                    if days.isEmpty {
+                        Text("No entries this month").foregroundColor(Gruv.fg4).padding(.top, 30)
+                    }
+                    ForEach(days, id: \.day) { grp in
+                        HStack {
+                            Text(hoursDayHdrFmt.string(from: grp.day)).font(.system(size: 12, weight: .semibold)).foregroundColor(Gruv.fg4)
+                            Spacer()
+                            Text(durText(model.daySeconds(grp.day))).font(.system(size: 12)).foregroundColor(Gruv.fg4)
+                        }.padding(.top, 8)
+                        ForEach(grp.items) { e in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Button {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(e.task, forType: .string)
+                                    copiedID = e.id
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if copiedID == e.id { copiedID = nil } }
+                                } label: {
+                                    Image(systemName: copiedID == e.id ? "checkmark" : "doc.on.doc")
+                                        .foregroundColor(copiedID == e.id ? Gruv.green : Gruv.fg4)
+                                        .font(.system(size: 11))
+                                }.buttonStyle(.plain).help("Copy task text")
+                                Text(hoursDayFmt.string(from: e.start)).font(.system(size: 12, design: .monospaced)).foregroundColor(Gruv.fg4).frame(width: 42, alignment: .leading)
+                                Text(e.task.isEmpty ? "—" : e.task).foregroundColor(Gruv.fg1).textSelection(.enabled)
+                                Spacer()
+                                Text(decimalHours(e.seconds) + " h").font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundColor(Gruv.fg2)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+                .padding(.bottom, 10)
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 420, minHeight: 420)
+    }
+}
+
+final class HoursWindowController {
+    static let shared = HoursWindowController()
+    private var window: NSWindow?
+
+    func show(model: HoursModel) {
+        if let w = window { w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 640),
+                         styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        w.title = "Hours"
+        w.titlebarAppearsTransparent = true
+        w.isReleasedWhenClosed = false
+        w.appearance = NSAppearance(named: .darkAqua)
+        w.level = .floating                          // stay above the browser while filling Severa
+        let visual = NSVisualEffectView()
+        visual.material = .hudWindow
+        visual.blendingMode = .behindWindow
+        visual.state = .active
+        visual.appearance = NSAppearance(named: .darkAqua)
+        w.contentView = visual
+        let hosting = NSHostingView(rootView: HoursWindow(model: model))
+        hosting.frame = visual.bounds
+        hosting.autoresizingMask = [.width, .height]
+        visual.addSubview(hosting)
+        w.center()
+        window = w
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}

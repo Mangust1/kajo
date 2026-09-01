@@ -21,7 +21,7 @@ let kajoConfigDir = NSHomeDirectory() + "/.config/"
 // MARK: - Tabs
 
 enum Tab: String, CaseIterable, Identifiable {
-    case calendar, timer, music, sound, power, network, unifi, vpn, home, pi, ai, system, currency, memes, clipboard
+    case calendar, timer, music, sound, power, network, unifi, vpn, home, pi, ai, system, currency, memes, clipboard, hours
 
     var id: String { rawValue }
 
@@ -42,6 +42,7 @@ enum Tab: String, CaseIterable, Identifiable {
         case .memes:    return "Memes"
         case .clipboard: return "Clipboard"
         case .currency: return "Currency"
+        case .hours:    return "Hours"
         }
     }
 
@@ -62,6 +63,7 @@ enum Tab: String, CaseIterable, Identifiable {
         case .memes:    return "photo.stack"
         case .clipboard: return "doc.on.clipboard"
         case .currency: return "dollarsign.arrow.circlepath"
+        case .hours:    return "clock.badge.checkmark"
         }
     }
 }

@@ -6,9 +6,9 @@
 
 A Noctalia-inspired drop-down control center for macOS: **one translucent, Gruvbox-themed window with everything on tabs**, summoned pre-switched to whichever tab you ask for. Pure `swiftc` + a Makefile — **no Xcode**. Runs as an `LSUIElement` agent (no dock icon).
 
-15 tabs. Some work for anyone; some expect the author's home-lab and just show a "No config" hint until you point them at your own services:
+16 tabs. Some work for anyone; some expect the author's home-lab and just show a "No config" hint until you point them at your own services:
 
-- **Universal:** Calendar (world clocks + weather + events), Timer, Now Playing (Spotify), Sound (output/input + Bluetooth audio battery levels — AirPods L/R/case), Power, Network (Wi-Fi scan/join, service priority, copy-able local/public IP, and a speed test — built-in `networkQuality` or live-streaming Ookla `speedtest`), System (Keep Awake with optional timer + Empty Trash + a Settings button), Memes, Clipboard (with a URL tracking cleaner — strips tracking params + Echobox/xtor fragments, `kajo://clip/clean` — and send-to-Android via KDE Connect), Currency (configurable multi-currency converter via ECB rates, no API key).
+- **Universal:** Calendar (world clocks + weather + events), Timer, Now Playing (Spotify), Sound (output/input + Bluetooth audio battery levels — AirPods L/R/case), Power, Network (Wi-Fi scan/join, service priority, copy-able local/public IP, and a speed test — built-in `networkQuality` or live-streaming Ookla `speedtest`), System (Keep Awake with optional timer + Empty Trash + a Settings button), Memes, Clipboard (with a URL tracking cleaner — strips tracking params + Echobox/xtor fragments, `kajo://clip/clean` — and send-to-Android via KDE Connect), Currency (configurable multi-currency converter via ECB rates, no API key), Hours (a stopwatch-plus-text work-hour tracker that logs entries per day, edits/resumes them, and one-click copies a chronological month list for pasting into a timesheet — with a floating always-on-top window to park beside the browser).
 - **Needs your own backend (optional):** UniFi, Home (Home Assistant), Pi (a small health container), VPN, AI (a local oMLX server).
 
 > ⚠️ It's a personal tool, not a polished product. It has a **built-in menu-bar icon** (plus `kajo://tab/<name>` URLs) to summon the panel, and reads optional per-module config from `~/.config/kajo/` — editable in a built-in **Settings window** (menu-bar → *Settings…*, the System tab's Settings button, or `kajo://config`) with typed forms *and* a raw-JSON view per file, or by hand (see `config-examples/`). Getting it running on a fresh Mac still means building it and sorting out code-signing — `./install.sh` (below) or the Claude Code prompt handles that.
@@ -18,6 +18,13 @@ A Noctalia-inspired drop-down control center for macOS: **one translucent, Gruvb
 <p align="center">
   <img src="assets/kajo-screenshots.png" alt="Kajo tabs — Calendar, Now Playing, Sound, AI, Power, System" width="840">
 </p>
+
+<p align="center">
+  <img src="assets/kajo-hours.png" alt="Hours tab — stopwatch + daily log" height="440">
+  &nbsp;&nbsp;
+  <img src="assets/kajo-hours-window.png" alt="Hours floating window — chronological month list for Severa" height="440">
+</p>
+<p align="center"><sub>The <b>Hours</b> tab (left) and its floating, always-on-top window (right) for filling a monthly timesheet.</sub></p>
 
 ---
 
@@ -115,4 +122,4 @@ open "kajo://config"            # or the menu-bar Settings… item
 
 ## Status
 
-v0.23 — 15 working tabs, quake-style slide animation, code-signed (TCC persists), UniFi/Network/Pi cached for instant open. New: a **Settings window** (`ConfigWindow.swift` — translucent, per-file typed forms ⇄ raw JSON, templates, validity check, Relaunch), the System tab's **Keep Awake timer** (15m–4h presets with live countdown), Currency is now **config-driven** (`currency.json`), and an **`install.sh`** that automates prereqs + signing. Source split per-tab across `Sources/*.swift` (main.swift = bootstrap only).
+v0.24 — 16 working tabs, quake-style slide animation, code-signed (TCC persists), UniFi/Network/Pi cached for instant open. New: an **Hours** tab (`Hours.swift`) — a stopwatch-plus-text work-hour tracker with an editable per-day log, month navigation, one-click **copy-month** for a timesheet, and a floating always-on-top window. Earlier: a **Settings window** (`ConfigWindow.swift` — translucent, per-file typed forms ⇄ raw JSON, templates, validity check, Relaunch), the System tab's **Keep Awake timer** (15m–4h presets with live countdown), Currency is now **config-driven** (`currency.json`), and an **`install.sh`** that automates prereqs + signing. Source split per-tab across `Sources/*.swift` (main.swift = bootstrap only).
