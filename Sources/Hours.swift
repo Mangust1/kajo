@@ -155,19 +155,25 @@ struct HoursTab: View {
     private var tracker: some View {
         Group {
             if let r = model.running {
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(r.task).foregroundColor(Gruv.fg1).lineLimit(1)
-                        Text(durText(model.tick.timeIntervalSince(r.start), seconds: true))
-                            .font(.system(size: 20, weight: .semibold, design: .monospaced))
-                            .foregroundColor(Gruv.green)
+                if editingID == r.id {
+                    editor(r)                       // tap the card to edit the running task's text + start time
+                } else {
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(r.task.isEmpty ? "—" : r.task).foregroundColor(Gruv.fg1).lineLimit(1)
+                            Text(durText(model.tick.timeIntervalSince(r.start), seconds: true))
+                                .font(.system(size: 20, weight: .semibold, design: .monospaced))
+                                .foregroundColor(Gruv.green)
+                        }
+                        Spacer()
+                        Button { model.stop() } label: {
+                            Image(systemName: "stop.circle.fill").font(.system(size: 30)).foregroundColor(Gruv.red)
+                        }.buttonStyle(.plain).help("Stop")
                     }
-                    Spacer()
-                    Button { model.stop() } label: {
-                        Image(systemName: "stop.circle.fill").font(.system(size: 30)).foregroundColor(Gruv.red)
-                    }.buttonStyle(.plain).help("Stop")
+                    .padding(12).background(Gruv.bg1).cornerRadius(10)
+                    .contentShape(Rectangle())
+                    .onTapGesture { draftEntry = r; editingID = r.id }
                 }
-                .padding(12).background(Gruv.bg1).cornerRadius(10)
             } else {
                 HStack(spacing: 10) {
                     TextField("What are you working on?", text: $model.draft)
@@ -248,15 +254,22 @@ struct HoursTab: View {
         .onTapGesture { draftEntry = e; editingID = e.id }
     }
 
+    private enum EditField: Hashable { case task, start, end }
+    @FocusState private var focus: EditField?
+
     private func editor(_ e: TimeEntry) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        func commit() { model.update(draftEntry); editingID = nil; focus = nil }
+        return VStack(alignment: .leading, spacing: 8) {
             TextField("Task", text: $draftEntry.task)
                 .textFieldStyle(.roundedBorder)
-                .onSubmit { model.update(draftEntry); editingID = nil }
+                .focused($focus, equals: .task)
+                .onSubmit(commit)
             DatePicker("Start", selection: $draftEntry.start).datePickerStyle(.field).font(.system(size: 12))
+                .focused($focus, equals: .start)
             if draftEntry.end != nil {
                 DatePicker("End", selection: Binding(get: { draftEntry.end ?? Date() }, set: { draftEntry.end = $0 }))
                     .datePickerStyle(.field).font(.system(size: 12))
+                    .focused($focus, equals: .end)
             } else {
                 Text("running…").font(.system(size: 11)).foregroundColor(Gruv.green)
             }
@@ -264,13 +277,17 @@ struct HoursTab: View {
                 Button { model.delete(e); editingID = nil } label: { Image(systemName: "trash").foregroundColor(Gruv.red) }
                     .buttonStyle(.plain).help("Delete")
                 Spacer()
-                Button("Cancel") { editingID = nil }.buttonStyle(.plain).foregroundColor(Gruv.fg4)
-                Button("Save") { model.update(draftEntry); editingID = nil }.buttonStyle(.plain).foregroundColor(Gruv.green)
+                Button("Cancel") { editingID = nil; focus = nil }.buttonStyle(.plain).foregroundColor(Gruv.fg4)
+                Button("Save", action: commit).buttonStyle(.plain).foregroundColor(Gruv.green)
+                    .keyboardShortcut(.defaultAction)     // Enter saves from any field, incl. the date pickers
             }
         }
         .padding(10).background(Gruv.bg1)
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Gruv.green.opacity(0.5), lineWidth: 1))
         .cornerRadius(8)
+        // Don't intercept Tab — let AppKit's key-view loop walk task → the date pickers'
+        // day/month/year/hour/min sub-fields → buttons natively. Enter still saves (default action).
+        .onAppear { focus = .task }
     }
 }
 
