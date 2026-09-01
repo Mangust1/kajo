@@ -11,6 +11,15 @@ struct TimeEntry: Identifiable, Codable, Equatable {
     var seconds: TimeInterval { max(0, (end ?? Date()).timeIntervalSince(start)) }
 }
 
+// Same-task sessions within one day, collapsed into a single row (expandable).
+struct TaskGroup: Identifiable {
+    let day: Date
+    let task: String
+    let items: [TimeEntry]           // sessions, newest first
+    var id: String { "\(day.timeIntervalSinceReferenceDate)|\(task)" }
+    var seconds: TimeInterval { items.reduce(0) { $0 + $1.seconds } }
+}
+
 private let hoursDayFmt: DateFormatter    = { let f = DateFormatter(); f.dateFormat = "d.M."; return f }()
 private let hoursDayHdrFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "EEE d.M."; f.locale = Locale(identifier: "en_US"); return f }()
 private let hoursMonthFmt: DateFormatter  = { let f = DateFormatter(); f.dateFormat = "LLLL yyyy"; f.locale = Locale(identifier: "en_US"); return f }()
@@ -65,7 +74,8 @@ final class HoursModel: ObservableObject {
         if entries[i].seconds < 1 { entries.remove(at: i) }   // discard accidental taps
         save(); stopTicker()
     }
-    func resume(_ e: TimeEntry) { stop(); start(task: e.task) }
+    func resume(_ e: TimeEntry) { resume(task: e.task) }
+    func resume(task: String) { stop(); start(task: task) }
 
     // MARK: edit / delete / add
     func update(_ e: TimeEntry) {
@@ -95,22 +105,37 @@ final class HoursModel: ObservableObject {
     func daySeconds(_ day: Date) -> TimeInterval {
         entries.filter { Calendar.current.isDate($0.start, inSameDayAs: day) }.reduce(0) { $0 + $1.seconds }
     }
-    // completed entries in the viewed month, grouped by day (newest day first); running one lives in the card
-    func days() -> [(day: Date, items: [TimeEntry])] {
+    // completed entries in the viewed month, grouped by day (newest day first), then by task
+    // within each day (same task done several times collapses to one group). Running one lives in the card.
+    func days() -> [(day: Date, groups: [TaskGroup])] {
         let logged = entries.filter { $0.end != nil && inMonth($0) }
-        let groups = Dictionary(grouping: logged) { Calendar.current.startOfDay(for: $0.start) }
-        return groups.keys.sorted(by: >).map { (day: $0, items: groups[$0]!.sorted { $0.start > $1.start }) }
+        let byDay = Dictionary(grouping: logged) { Calendar.current.startOfDay(for: $0.start) }
+        return byDay.keys.sorted(by: >).map { day in
+            var order: [String] = []                 // preserve most-recent-session-first order
+            var map: [String: [TimeEntry]] = [:]
+            for e in byDay[day]!.sorted(by: { $0.start > $1.start }) {
+                if map[e.task] == nil { order.append(e.task) }
+                map[e.task, default: []].append(e)
+            }
+            return (day: day, groups: order.map { TaskGroup(day: day, task: $0, items: map[$0]!) })
+        }
     }
 
-    // MARK: export (chronological per-entry list for Severa)
+    // MARK: export (one line per task per day, chronological — for Severa)
     func exportMonth() -> String {
-        let rows = entries.filter { $0.end != nil && inMonth($0) }.sorted { $0.start < $1.start }
-        var out = hoursMonthFmt.string(from: month) + "\n\n"
+        let rows = entries.filter { $0.end != nil && inMonth($0) }
+        struct Key: Hashable { let day: Date; let task: String }
+        var sum: [Key: TimeInterval] = [:], first: [Key: Date] = [:]
         for e in rows {
-            out += "\(hoursDayFmt.string(from: e.start))  \(e.task.isEmpty ? "—" : e.task) — \(decimalHours(e.seconds)) h\n"
+            let k = Key(day: Calendar.current.startOfDay(for: e.start), task: e.task)
+            sum[k, default: 0] += e.seconds
+            first[k] = min(first[k] ?? e.start, e.start)
         }
-        let total = rows.reduce(0.0) { $0 + $1.seconds }
-        out += "\nTotal: \(decimalHours(total)) h\n"
+        var out = hoursMonthFmt.string(from: month) + "\n\n"
+        for k in sum.keys.sorted(by: { (first[$0] ?? .distantPast) < (first[$1] ?? .distantPast) }) {
+            out += "\(hoursDayFmt.string(from: k.day))  \(k.task.isEmpty ? "—" : k.task) — \(decimalHours(sum[k]!)) h\n"
+        }
+        out += "\nTotal: \(decimalHours(sum.values.reduce(0, +))) h\n"
         return out
     }
     func copyMonth() {
@@ -139,7 +164,8 @@ final class HoursModel: ObservableObject {
 struct HoursTab: View {
     @ObservedObject var model: HoursModel
     @State private var editingID: UUID?
-    @State private var copiedID: UUID?
+    @State private var copiedTag: String?
+    @State private var expanded: Set<String> = []          // group ids showing their sessions
     @State private var draftEntry = TimeEntry(task: "", start: Date(), end: Date())
 
     var body: some View {
@@ -218,14 +244,77 @@ struct HoursTab: View {
                         Text(durText(model.daySeconds(grp.day))).font(.system(size: 11)).foregroundColor(Gruv.fg4)
                     }
                     .padding(.top, 4)
-                    ForEach(grp.items) { e in
-                        if editingID == e.id { editor(e) } else { row(e) }
-                    }
+                    ForEach(grp.groups) { g in groupView(g) }
                 }
             }
             .padding(.bottom, 8)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    // copy `text` to the pasteboard with a 1 s ✓ flash, disambiguated by `tag` (entry id or group id)
+    private func copyButton(_ text: String, tag: String) -> some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copiedTag = tag
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if copiedTag == tag { copiedTag = nil } }
+        } label: {
+            Image(systemName: copiedTag == tag ? "checkmark" : "doc.on.doc")
+                .foregroundColor(copiedTag == tag ? Gruv.green : Gruv.fg4)
+        }.buttonStyle(.plain).help("Copy task text")
+    }
+
+    // A day's task-group: a single session renders as a plain row; multiple sessions
+    // collapse to a header showing the total, expandable to the individual sessions.
+    @ViewBuilder private func groupView(_ g: TaskGroup) -> some View {
+        if g.items.count == 1 {
+            let e = g.items[0]
+            if editingID == e.id { editor(e) } else { row(e) }
+        } else {
+            VStack(spacing: 6) {
+                groupHeader(g)
+                if expanded.contains(g.id) {
+                    ForEach(g.items) { e in
+                        if editingID == e.id { editor(e) } else { sessionRow(e) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func groupHeader(_ g: TaskGroup) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: expanded.contains(g.id) ? "chevron.down" : "chevron.right")
+                .font(.system(size: 10)).foregroundColor(Gruv.fg4).frame(width: 10)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(g.task.isEmpty ? "—" : g.task).foregroundColor(Gruv.fg1).lineLimit(1)
+                Text("\(g.items.count) sessions").font(.system(size: 10)).foregroundColor(Gruv.fg4)
+            }
+            Spacer()
+            Text(durText(g.seconds)).font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundColor(Gruv.fg2)
+            copyButton(g.task, tag: g.id)
+            Button { model.resume(task: g.task) } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(.plain).foregroundColor(Gruv.blue).help("Resume this task")
+        }
+        .padding(10).background(Gruv.bg1).cornerRadius(8)
+        .contentShape(Rectangle())
+        .onTapGesture { if expanded.contains(g.id) { expanded.remove(g.id) } else { expanded.insert(g.id) } }
+    }
+
+    // one session inside an expanded group — compact, tap to edit
+    private func sessionRow(_ e: TimeEntry) -> some View {
+        HStack(spacing: 8) {
+            Text("\(hoursTimeFmt.string(from: e.start))–\(e.end.map { hoursTimeFmt.string(from: $0) } ?? "…")")
+                .font(.system(size: 11, design: .monospaced)).foregroundColor(Gruv.fg4)
+            Spacer()
+            Text(durText(e.seconds)).font(.system(size: 11, design: .monospaced)).foregroundColor(Gruv.fg4)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(Gruv.bg0).cornerRadius(6)
+        .padding(.leading, 18)
+        .contentShape(Rectangle())
+        .onTapGesture { draftEntry = e; editingID = e.id }
     }
 
     private func row(_ e: TimeEntry) -> some View {
@@ -237,15 +326,7 @@ struct HoursTab: View {
             }
             Spacer()
             Text(durText(e.seconds)).font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundColor(Gruv.fg2)
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(e.task, forType: .string)
-                copiedID = e.id
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if copiedID == e.id { copiedID = nil } }
-            } label: {
-                Image(systemName: copiedID == e.id ? "checkmark" : "doc.on.doc")
-                    .foregroundColor(copiedID == e.id ? Gruv.green : Gruv.fg4)
-            }.buttonStyle(.plain).help("Copy task text")
+            copyButton(e.task, tag: e.id.uuidString)
             Button { model.resume(e) } label: { Image(systemName: "arrow.clockwise") }
                 .buttonStyle(.plain).foregroundColor(Gruv.blue).help("Resume this task")
         }
@@ -295,7 +376,7 @@ struct HoursTab: View {
 
 struct HoursWindow: View {
     @ObservedObject var model: HoursModel
-    @State private var copiedID: UUID?
+    @State private var copiedKey: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -321,22 +402,22 @@ struct HoursWindow: View {
                             Spacer()
                             Text(durText(model.daySeconds(grp.day))).font(.system(size: 12)).foregroundColor(Gruv.fg4)
                         }.padding(.top, 8)
-                        ForEach(grp.items) { e in
+                        ForEach(grp.groups) { g in
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Button {
                                     NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(e.task, forType: .string)
-                                    copiedID = e.id
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if copiedID == e.id { copiedID = nil } }
+                                    NSPasteboard.general.setString(g.task, forType: .string)
+                                    copiedKey = g.id
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if copiedKey == g.id { copiedKey = nil } }
                                 } label: {
-                                    Image(systemName: copiedID == e.id ? "checkmark" : "doc.on.doc")
-                                        .foregroundColor(copiedID == e.id ? Gruv.green : Gruv.fg4)
+                                    Image(systemName: copiedKey == g.id ? "checkmark" : "doc.on.doc")
+                                        .foregroundColor(copiedKey == g.id ? Gruv.green : Gruv.fg4)
                                         .font(.system(size: 11))
                                 }.buttonStyle(.plain).help("Copy task text")
-                                Text(hoursDayFmt.string(from: e.start)).font(.system(size: 12, design: .monospaced)).foregroundColor(Gruv.fg4).frame(width: 42, alignment: .leading)
-                                Text(e.task.isEmpty ? "—" : e.task).foregroundColor(Gruv.fg1).textSelection(.enabled)
+                                Text(hoursDayFmt.string(from: g.day)).font(.system(size: 12, design: .monospaced)).foregroundColor(Gruv.fg4).frame(width: 42, alignment: .leading)
+                                Text(g.task.isEmpty ? "—" : g.task).foregroundColor(Gruv.fg1).textSelection(.enabled)
                                 Spacer()
-                                Text(decimalHours(e.seconds) + " h").font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundColor(Gruv.fg2)
+                                Text(decimalHours(g.seconds) + " h").font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundColor(Gruv.fg2)
                             }
                             .padding(.vertical, 2)
                         }
