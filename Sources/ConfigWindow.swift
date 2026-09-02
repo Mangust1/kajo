@@ -182,6 +182,25 @@ let configFiles: [ConfigFile] = [
           "local": "http://192.168.1.50:9099/health"
         }
         """),
+    ConfigFile(name: "severa.json", title: "Severa", symbol: "clock.badge.checkmark", secret: true,
+        blurb: "Visma Severa REST credentials for the Hours project picker + direct upload. Client ID/secret come from a Severa admin (gear → Integrations). Grant scopes projects:read, hours:read, hours:write. userGuid scopes the picker to you. roundUpMinutes rounds each uploaded day/phase up to that step (0 = off). Saved chmod 600.",
+        fields: [
+            Field(key: "url", label: "REST base URL", kind: .text("https://api.severa.visma.com/rest-api")),
+            Field(key: "clientId", label: "Client ID", kind: .text("")),
+            Field(key: "clientSecret", label: "Client secret (API key)", kind: .secret),
+            Field(key: "userGuid", label: "Your user GUID", kind: .text("")),
+            Field(key: "roundUpMinutes", label: "Round up to (minutes)", kind: .int),
+        ],
+        template: """
+        {
+          "url": "https://api.severa.visma.com/rest-api",
+          "clientId": "YOUR_CLIENT_ID",
+          "clientSecret": "YOUR_CLIENT_SECRET",
+          "userGuid": "YOUR_USER_GUID",
+          "roundUpMinutes": 30
+        }
+        """,
+        help: ("How to create Severa REST credentials ↗", "https://support.severa.com/en/support/solutions/articles/77000545737-how-to-create-rest-api-credentials")),
 ]
 
 final class ConfigModel: ObservableObject {

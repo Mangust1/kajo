@@ -8,8 +8,38 @@ struct TimeEntry: Identifiable, Codable, Equatable {
     var task: String
     var start: Date
     var end: Date?                    // nil = currently running
+    // Optional Severa association (absent in old entries — Codable stays compatible).
+    var projectGuid: String?
+    var projectName: String?
+    var phaseGuid: String?
+    var phaseName: String?
+    var workTypeGuid: String?
+    var workTypeName: String?
     var seconds: TimeInterval { max(0, (end ?? Date()).timeIntervalSince(start)) }
+    // "Project · Phase" for display, or nil if unassigned.
+    var severaLabel: String? {
+        guard let ph = phaseName else { return projectName }
+        if let pj = projectName, pj != ph { return "\(pj) · \(ph)" }
+        return ph
+    }
 }
+
+// One aggregated Severa work-hour to sync: a day × phase × workType bucket.
+struct WorkHourPost: Identifiable {
+    let id = UUID()
+    let key: String             // stable bucket key (day|phase|workType)
+    let eventDate: Date
+    let phaseGuid: String
+    let phaseName: String
+    let workTypeGuid: String
+    let hours: Double           // rounded UP to next 0.5 h
+    let description: String
+    let sourceIDs: [UUID]       // Kajo entries folded into this post
+    let existingGuid: String?   // nil = POST new; set = PATCH this Severa workhour
+}
+
+// What we last pushed for a bucket — lets re-upload PATCH instead of duplicate.
+struct UploadRecord: Codable { var guid: String; var hours: Double; var desc: String }
 
 // Same-task sessions within one day, collapsed into a single row (expandable).
 struct TaskGroup: Identifiable {
@@ -24,6 +54,16 @@ private let hoursDayFmt: DateFormatter    = { let f = DateFormatter(); f.dateFor
 private let hoursDayHdrFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "EEE d.M."; f.locale = Locale(identifier: "en_US"); return f }()
 private let hoursMonthFmt: DateFormatter  = { let f = DateFormatter(); f.dateFormat = "LLLL yyyy"; f.locale = Locale(identifier: "en_US"); return f }()
 private let hoursTimeFmt: DateFormatter   = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f }()
+
+// Round decimal hours UP to the next `minutes`-step (Severa bills in fixed steps).
+// minutes <= 0 disables rounding (raw, to 0.01 h). Epsilon so an exact boundary
+// (e.g. 1.5 h at 30-min steps) doesn't float up a step; any real work is ≥ one step.
+func ceilToMinutes(_ hours: Double, _ minutes: Int) -> Double {
+    guard minutes > 0 else { return (hours * 100).rounded() / 100 }
+    let step = Double(minutes) / 60
+    let v = max(step, ceil((hours - 1e-9) / step) * step)
+    return (v * 10000).rounded() / 10000
+}
 
 private func decimalHours(_ s: TimeInterval) -> String {
     let h = (s / 3600 * 100).rounded() / 100
@@ -42,17 +82,32 @@ private func durText(_ s: TimeInterval, seconds: Bool = false) -> String {
 final class HoursModel: ObservableObject {
     @Published var entries: [TimeEntry] = []
     @Published var draft = ""
+    @Published var draftProject: SeveraProject?             // sticky Severa selection for the next start
+    @Published var draftPhase: SeveraPhase?
     @Published private(set) var tick = Date()               // drives the live elapsed readout
     @Published var month = HoursModel.monthStart(Date())    // month shown in the log
+    @Published private var uploads: [String: UploadRecord] = [:]   // bucketKey -> what's on Severa
 
     private let url = URL(fileURLWithPath: kajoConfigDir + "/hours.json")
+    private let uploadsKey = "hours.uploads.v1"
     private var ticker: Timer?
+
+    static func bucketKey(_ day: Date, _ phaseGuid: String, _ wtGuid: String) -> String {
+        "\(Int(Calendar.current.startOfDay(for: day).timeIntervalSinceReferenceDate))|\(phaseGuid)|\(wtGuid)"
+    }
+    // Has this entry been pushed to Severa? (its bucket has an upload record)
+    func isUploaded(_ e: TimeEntry) -> Bool {
+        guard let p = e.phaseGuid, let w = e.workTypeGuid else { return false }
+        return uploads[Self.bucketKey(e.start, p, w)] != nil
+    }
 
     var running: TimeEntry? { entries.first { $0.end == nil } }
 
     init() {
         try? FileManager.default.createDirectory(atPath: kajoConfigDir, withIntermediateDirectories: true)
         load()
+        if let d = UserDefaults.standard.data(forKey: uploadsKey),
+           let m = try? JSONDecoder().decode([String: UploadRecord].self, from: d) { uploads = m }
         if running != nil { startTicker() }
     }
 
@@ -64,7 +119,11 @@ final class HoursModel: ObservableObject {
     func start(task: String? = nil) {
         guard running == nil else { return }
         let name = (task ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
-        entries.insert(TimeEntry(task: name.isEmpty ? "Untitled" : name, start: Date(), end: nil), at: 0)
+        // Carry the sticky Severa selection onto the new entry (kept for the next start too).
+        entries.insert(TimeEntry(task: name.isEmpty ? "Untitled" : name, start: Date(), end: nil,
+                                 projectGuid: draftProject?.guid, projectName: draftProject?.name,
+                                 phaseGuid: draftPhase?.guid, phaseName: draftPhase?.name,
+                                 workTypeGuid: draftPhase?.workTypeGuid, workTypeName: draftPhase?.workTypeName), at: 0)
         draft = ""
         save(); startTicker()
     }
@@ -74,13 +133,30 @@ final class HoursModel: ObservableObject {
         if entries[i].seconds < 1 { entries.remove(at: i) }   // discard accidental taps
         save(); stopTicker()
     }
-    func resume(_ e: TimeEntry) { resume(task: e.task) }
-    func resume(task: String) { stop(); start(task: task) }
+    func resume(_ e: TimeEntry) {
+        stop()
+        if let pg = e.projectGuid { draftProject = SeveraProject(guid: pg, name: e.projectName ?? "—", phases: []) }
+        if let hg = e.phaseGuid {
+            draftPhase = SeveraPhase(guid: hg, name: e.phaseName ?? "—",
+                                     workTypeGuid: e.workTypeGuid, workTypeName: e.workTypeName)
+        }
+        start(task: e.task)
+    }
+    func resume(task: String) { stop(); start(task: task) }   // group resume: keeps current sticky selection
 
     // MARK: edit / delete / add
     func update(_ e: TimeEntry) {
         guard let i = entries.firstIndex(where: { $0.id == e.id }) else { return }
         entries[i] = e; save()
+    }
+    // Assign a Severa project·phase to a whole nest (all sessions of a task/day).
+    func setProject(ids: [UUID], project: SeveraProject?, phase: SeveraPhase?) {
+        for i in entries.indices where ids.contains(entries[i].id) {
+            entries[i].projectGuid = project?.guid;   entries[i].projectName = project?.name
+            entries[i].phaseGuid = phase?.guid;       entries[i].phaseName = phase?.name
+            entries[i].workTypeGuid = phase?.workTypeGuid; entries[i].workTypeName = phase?.workTypeName
+        }
+        save()
     }
     func delete(_ e: TimeEntry) {
         entries.removeAll { $0.id == e.id }
@@ -143,6 +219,55 @@ final class HoursModel: ObservableObject {
         NSPasteboard.general.setString(exportMonth(), forType: .string)
     }
 
+    // MARK: Severa upload — aggregate the viewed month into day×phase×workType posts
+    // (only completed, phase+workType-assigned entries not already uploaded).
+    // Buckets needing a sync: a bucket that's new (POST) or whose hours/description
+    // changed since last upload (PATCH the existing Severa row). Already-synced,
+    // unchanged buckets are omitted. Pass a `day` to scope to that day.
+    // The running entry (end == nil) is never included.
+    func pendingUploads(day: Date? = nil, roundMinutes: Int = 30) -> [WorkHourPost] {
+        let rows = entries.filter { e in
+            guard e.end != nil, e.phaseGuid != nil, e.workTypeGuid != nil else { return false }
+            return day == nil ? inMonth(e) : Calendar.current.isDate(e.start, inSameDayAs: day!)
+        }
+        struct Key: Hashable { let day: Date; let phase: String; let wt: String }
+        var order: [Key] = []
+        var bucket: [Key: [TimeEntry]] = [:]
+        for e in rows {
+            let k = Key(day: Calendar.current.startOfDay(for: e.start), phase: e.phaseGuid!, wt: e.workTypeGuid!)
+            if bucket[k] == nil { order.append(k) }
+            bucket[k, default: []].append(e)
+        }
+        return order.compactMap { k -> WorkHourPost? in
+            let items = bucket[k]!
+            let hours = ceilToMinutes(items.reduce(0) { $0 + $1.seconds } / 3600, roundMinutes)
+            var seen = Set<String>(); var descs: [String] = []
+            for e in items.sorted(by: { $0.start < $1.start }) {
+                let t = e.task.trimmingCharacters(in: .whitespaces)
+                if !t.isEmpty && seen.insert(t).inserted { descs.append(t) }
+            }
+            let desc = descs.joined(separator: ", ")
+            let bk = Self.bucketKey(k.day, k.phase, k.wt)
+            if let rec = uploads[bk], rec.hours == hours, rec.desc == desc { return nil }   // already synced, unchanged
+            return WorkHourPost(key: bk, eventDate: k.day, phaseGuid: k.phase,
+                                phaseName: items.first?.phaseName ?? "—", workTypeGuid: k.wt,
+                                hours: hours, description: desc,
+                                sourceIDs: items.map { $0.id }, existingGuid: uploads[bk]?.guid)
+        }
+    }
+    // Completed entries with no phase assigned (can't upload).
+    func unassignedCount(day: Date? = nil) -> Int {
+        entries.filter { e in
+            guard e.end != nil, e.phaseGuid == nil else { return false }
+            return day == nil ? inMonth(e) : Calendar.current.isDate(e.start, inSameDayAs: day!)
+        }.count
+    }
+    // Record a successful POST/PATCH so re-uploads update instead of duplicating.
+    func recordUpload(_ p: WorkHourPost, guid: String) {
+        uploads[p.key] = UploadRecord(guid: guid, hours: p.hours, desc: p.description)
+        if let d = try? JSONEncoder().encode(uploads) { UserDefaults.standard.set(d, forKey: uploadsKey) }
+    }
+
     // MARK: ticker + persistence
     private func startTicker() {
         ticker?.invalidate()
@@ -163,18 +288,27 @@ final class HoursModel: ObservableObject {
 
 struct HoursTab: View {
     @ObservedObject var model: HoursModel
+    @StateObject private var severa = SeveraModel()
     @State private var editingID: UUID?
     @State private var copiedTag: String?
     @State private var expanded: Set<String> = []          // group ids showing their sessions
     @State private var draftEntry = TimeEntry(task: "", start: Date(), end: Date())
+    @State private var confirmDay: Date?          // day pending upload confirmation
+    @State private var uploading = false
+    @State private var uploadMsg: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             tracker
             monthBar
+            if let m = uploadMsg {
+                Text(m).font(.system(size: 11))
+                    .foregroundColor(m.hasPrefix("✓") ? Gruv.green : Gruv.red)
+            }
             log
         }
         .frame(maxHeight: .infinity, alignment: .top)
+        .onAppear { severa.refresh() }
     }
 
     // running / start card
@@ -187,6 +321,9 @@ struct HoursTab: View {
                     HStack(spacing: 10) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(r.task.isEmpty ? "—" : r.task).foregroundColor(Gruv.fg1).lineLimit(1)
+                            if let s = r.severaLabel {
+                                Text(s).font(.system(size: 10)).foregroundColor(Gruv.blue).lineLimit(1)
+                            }
                             Text(durText(model.tick.timeIntervalSince(r.start), seconds: true))
                                 .font(.system(size: 20, weight: .semibold, design: .monospaced))
                                 .foregroundColor(Gruv.green)
@@ -201,13 +338,20 @@ struct HoursTab: View {
                     .onTapGesture { draftEntry = r; editingID = r.id }
                 }
             } else {
-                HStack(spacing: 10) {
-                    TextField("What are you working on?", text: $model.draft)
-                        .textFieldStyle(.plain).foregroundColor(Gruv.fg1)
-                        .onSubmit { model.start() }
-                    Button { model.start() } label: {
-                        Image(systemName: "play.circle.fill").font(.system(size: 30)).foregroundColor(Gruv.green)
-                    }.buttonStyle(.plain).help("Start")
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 10) {
+                        TextField("What are you working on?", text: $model.draft)
+                            .textFieldStyle(.plain).foregroundColor(Gruv.fg1)
+                            .onSubmit { model.start() }
+                        Button { model.start() } label: {
+                            Image(systemName: "play.circle.fill").font(.system(size: 30)).foregroundColor(Gruv.green)
+                        }.buttonStyle(.plain).help("Start")
+                    }
+                    if severa.configured {
+                        severaMenu(current: model.draftPhase?.name ?? model.draftProject?.name) { p, ph in
+                            model.draftProject = p; model.draftPhase = ph
+                        }
+                    }
                 }
                 .padding(12).background(Gruv.bg1).cornerRadius(10)
             }
@@ -228,6 +372,39 @@ struct HoursTab: View {
             Button { let e = model.addManual(); draftEntry = e; editingID = e.id } label: { Image(systemName: "plus") }
                 .buttonStyle(.plain).foregroundColor(Gruv.green).help("Add entry manually")
         }
+        .confirmationDialog(uploadPrompt, isPresented: Binding(get: { confirmDay != nil }, set: { if !$0 { confirmDay = nil } }), titleVisibility: .visible) {
+            Button("Upload to Severa") { if let d = confirmDay { confirmDay = nil; Task { await runUpload(day: d) } } }
+            Button("Cancel", role: .cancel) { confirmDay = nil }
+        }
+    }
+
+    private var uploadPrompt: String {
+        guard let d = confirmDay else { return "" }
+        let posts = model.pendingUploads(day: d, roundMinutes: severa.roundUpMinutes)
+        let news = posts.filter { $0.existingGuid == nil }.count
+        let upd = posts.count - news
+        let hrs = posts.reduce(0) { $0 + $1.hours }
+        let un = model.unassignedCount(day: d)
+        var parts: [String] = []
+        if news > 0 { parts.append("\(news) new") }
+        if upd > 0 { parts.append("\(upd) updated") }
+        let rounding = severa.roundUpMinutes > 0 ? ", rounded up to \(severa.roundUpMinutes) min" : ""
+        var s = "Sync \(hoursDayHdrFmt.string(from: d)) to Severa — \(parts.joined(separator: ", ")) (\(decimalHours(hrs * 3600)) h\(rounding))?"
+        if un > 0 { s += "\n\(un) unassigned entr\(un == 1 ? "y is" : "ies are") skipped (pick a project first)." }
+        return s
+    }
+
+    private func runUpload(day: Date) async {
+        uploading = true; uploadMsg = nil
+        let posts = model.pendingUploads(day: day, roundMinutes: severa.roundUpMinutes)
+        var ok = 0, fail = 0
+        for p in posts {
+            if let guid = await severa.sync(p) { model.recordUpload(p, guid: guid); ok += 1 }
+            else { fail += 1 }
+        }
+        uploading = false
+        uploadMsg = fail == 0 ? "✓ Synced \(ok) to Severa (\(hoursDayFmt.string(from: day)))" : "Synced \(ok), \(fail) failed"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { if uploadMsg != nil { uploadMsg = nil } }
     }
 
     private var log: some View {
@@ -238,10 +415,15 @@ struct HoursTab: View {
                     Text("No entries this month").foregroundColor(Gruv.fg4).font(.system(size: 12)).padding(.top, 24)
                 }
                 ForEach(days, id: \.day) { grp in
-                    HStack {
+                    HStack(spacing: 6) {
                         Text(hoursDayHdrFmt.string(from: grp.day)).font(.system(size: 11, weight: .semibold)).foregroundColor(Gruv.fg4)
                         Spacer()
                         Text(durText(model.daySeconds(grp.day))).font(.system(size: 11)).foregroundColor(Gruv.fg4)
+                        if severa.configured && !model.pendingUploads(day: grp.day, roundMinutes: severa.roundUpMinutes).isEmpty {
+                            Button { confirmDay = grp.day } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 12)) }
+                                .buttonStyle(.plain).foregroundColor(Gruv.blue).disabled(uploading)
+                                .help("Upload this day to Severa")
+                        }
                     }
                     .padding(.top, 4)
                     ForEach(grp.groups) { g in groupView(g) }
@@ -265,6 +447,38 @@ struct HoursTab: View {
         }.buttonStyle(.plain).help("Copy task text")
     }
 
+    // Severa project → phase picker. Nested Menu: projects, each expanding to its
+    // phases; picking a phase sets both. `current` is the label to show.
+    private func severaMenu(current: String?, tint: Color = Gruv.blue, onPick: @escaping (SeveraProject?, SeveraPhase?) -> Void) -> some View {
+        Menu {
+            if !severa.configured {
+                Text(severa.status)
+            } else if severa.projects.isEmpty {
+                Text(severa.status.isEmpty ? "Loading…" : severa.status)
+                Button("Refresh") { severa.refresh() }
+            } else {
+                Button("None") { onPick(nil, nil) }
+                ForEach(severa.projects) { p in
+                    Menu(p.name) {
+                        if p.phases.isEmpty {
+                            Button(p.name) { onPick(p, nil) }
+                        } else {
+                            ForEach(p.phases) { ph in Button(ph.name) { onPick(p, ph) } }
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "briefcase").font(.system(size: 11))
+                Text(current ?? "Project").font(.system(size: 11)).lineLimit(1).truncationMode(.tail)
+            }
+            .foregroundColor(current == nil ? Gruv.fg4 : tint)
+            .frame(maxWidth: .infinity, alignment: .leading)   // truncate, don't push the window wide
+        }
+        .menuStyle(.borderlessButton)
+    }
+
     // A day's task-group: a single session renders as a plain row; multiple sessions
     // collapse to a header showing the total, expandable to the individual sessions.
     @ViewBuilder private func groupView(_ g: TaskGroup) -> some View {
@@ -276,7 +490,7 @@ struct HoursTab: View {
                 groupHeader(g)
                 if expanded.contains(g.id) {
                     ForEach(g.items) { e in
-                        if editingID == e.id { editor(e) } else { sessionRow(e) }
+                        if editingID == e.id { editor(e, showProject: false) } else { sessionRow(e) }
                     }
                 }
             }
@@ -289,7 +503,18 @@ struct HoursTab: View {
                 .font(.system(size: 10)).foregroundColor(Gruv.fg4).frame(width: 10)
             VStack(alignment: .leading, spacing: 2) {
                 Text(g.task.isEmpty ? "—" : g.task).foregroundColor(Gruv.fg1).lineLimit(1)
-                Text("\(g.items.count) sessions").font(.system(size: 10)).foregroundColor(Gruv.fg4)
+                if severa.configured {
+                    let up = g.items.first.map { model.isUploaded($0) } ?? false
+                    HStack(spacing: 3) {
+                        if up { Image(systemName: "checkmark.icloud.fill").font(.system(size: 9)).foregroundColor(Gruv.green) }
+                        severaMenu(current: g.items.first?.phaseName ?? g.items.first?.projectName,
+                                   tint: up ? Gruv.green : Gruv.blue) { p, ph in
+                            model.setProject(ids: g.items.map { $0.id }, project: p, phase: ph)
+                        }
+                    }
+                } else {
+                    Text("\(g.items.count) sessions").font(.system(size: 10)).foregroundColor(Gruv.fg4)
+                }
             }
             Spacer()
             Text(durText(g.seconds)).font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundColor(Gruv.fg2)
@@ -321,6 +546,13 @@ struct HoursTab: View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(e.task.isEmpty ? "—" : e.task).foregroundColor(Gruv.fg1).lineLimit(1)
+                if let s = e.severaLabel {
+                    let up = model.isUploaded(e)
+                    HStack(spacing: 3) {
+                        if up { Image(systemName: "checkmark.icloud.fill").font(.system(size: 9)).foregroundColor(Gruv.green) }
+                        Text(s).font(.system(size: 10)).foregroundColor(up ? Gruv.green : Gruv.blue).lineLimit(1)
+                    }
+                }
                 Text("\(hoursTimeFmt.string(from: e.start))–\(e.end.map { hoursTimeFmt.string(from: $0) } ?? "…")")
                     .font(.system(size: 10)).foregroundColor(Gruv.fg4)
             }
@@ -338,7 +570,7 @@ struct HoursTab: View {
     private enum EditField: Hashable { case task, start, end }
     @FocusState private var focus: EditField?
 
-    private func editor(_ e: TimeEntry) -> some View {
+    private func editor(_ e: TimeEntry, showProject: Bool = true) -> some View {
         func commit() { model.update(draftEntry); editingID = nil; focus = nil }
         return VStack(alignment: .leading, spacing: 8) {
             TextField("Task", text: $draftEntry.task)
@@ -353,6 +585,13 @@ struct HoursTab: View {
                     .focused($focus, equals: .end)
             } else {
                 Text("running…").font(.system(size: 11)).foregroundColor(Gruv.green)
+            }
+            if severa.configured && showProject {
+                severaMenu(current: draftEntry.phaseName ?? draftEntry.projectName) { p, ph in
+                    draftEntry.projectGuid = p?.guid; draftEntry.projectName = p?.name
+                    draftEntry.phaseGuid = ph?.guid; draftEntry.phaseName = ph?.name
+                    draftEntry.workTypeGuid = ph?.workTypeGuid; draftEntry.workTypeName = ph?.workTypeName
+                }
             }
             HStack {
                 Button { model.delete(e); editingID = nil } label: { Image(systemName: "trash").foregroundColor(Gruv.red) }
