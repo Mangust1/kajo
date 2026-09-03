@@ -84,6 +84,7 @@ final class HoursModel: ObservableObject {
     @Published var draft = ""
     @Published var draftProject: SeveraProject?             // sticky Severa selection for the next start
     @Published var draftPhase: SeveraPhase?
+    @Published var draftTouched = false                     // user hand-picked the start-card project → don't auto-match
     @Published private(set) var tick = Date()               // drives the live elapsed readout
     @Published var month = HoursModel.monthStart(Date())    // month shown in the log
     @Published private var uploads: [String: UploadRecord] = [:]   // bucketKey -> what's on Severa
@@ -311,6 +312,17 @@ struct HoursTab: View {
         .onAppear { severa.refresh() }
     }
 
+    // Start the timer, auto-filling the Severa project from the task text — but only
+    // if the user hasn't hand-picked one for this start (draftTouched). Auto happens
+    // only at creation; a created entry's project is never changed automatically.
+    private func beginTracking() {
+        if severa.configured, !model.draftTouched, let m = severa.match(model.draft) {
+            model.draftProject = m.project; model.draftPhase = m.phase
+        }
+        model.start()
+        model.draftTouched = false   // next task auto-matches again unless hand-picked
+    }
+
     // running / start card
     private var tracker: some View {
         Group {
@@ -342,14 +354,14 @@ struct HoursTab: View {
                     HStack(spacing: 10) {
                         TextField("What are you working on?", text: $model.draft)
                             .textFieldStyle(.plain).foregroundColor(Gruv.fg1)
-                            .onSubmit { model.start() }
-                        Button { model.start() } label: {
+                            .onSubmit { beginTracking() }
+                        Button { beginTracking() } label: {
                             Image(systemName: "play.circle.fill").font(.system(size: 30)).foregroundColor(Gruv.green)
                         }.buttonStyle(.plain).help("Start")
                     }
                     if severa.configured {
                         severaMenu(current: model.draftPhase?.name ?? model.draftProject?.name) { p, ph in
-                            model.draftProject = p; model.draftPhase = ph
+                            model.draftProject = p; model.draftPhase = ph; model.draftTouched = true
                         }
                     }
                 }

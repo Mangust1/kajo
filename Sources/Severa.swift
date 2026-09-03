@@ -169,6 +169,36 @@ final class SeveraModel: ObservableObject {
         } catch { return nil }
     }
 
+    // Generic words that don't identify a customer/project — dropped before matching.
+    private static let stopwords: Set<String> = [
+        "the", "and", "of", "for", "consultancy", "development", "internal", "work",
+        "package", "unit", "support", "updates", "fixes", "bug", "bugs", "service",
+        "center", "project", "and", "sivuston", "jatkokehitys",
+    ]
+    static func keywords(_ name: String) -> [String] {
+        name.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+            .filter { $0.count >= 3 && !stopwords.contains($0) && !$0.allSatisfy(\.isNumber) }
+    }
+
+    /// Best project·phase for a free-text task, by matching a distinctive word of a
+    /// project name (e.g. "acme", "globex") against the text.
+    /// nil if nothing matches. Used to auto-fill the project when a task is created.
+    func match(_ task: String) -> (project: SeveraProject, phase: SeveraPhase)? {
+        let t = task.lowercased()
+        guard t.count >= 2, !projects.isEmpty else { return nil }
+        var best: (SeveraProject, SeveraPhase, Int)?
+        for p in projects {
+            guard let hit = Self.keywords(p.name).filter({ t.contains($0) }).max(by: { $0.count < $1.count })
+            else { continue }
+            // Prefer a phase whose own distinctive word is in the text; else its only/first phase.
+            let phase = p.phases.first { ph in Self.keywords(ph.name).contains { $0 != hit && t.contains($0) } }
+                ?? p.phases.first
+            guard let ph = phase else { continue }
+            if best == nil || hit.count > best!.2 { best = (p, ph, hit.count) }
+        }
+        return best.map { ($0.0, $0.1) }
+    }
+
     // Distinct project→phase pairs (each phase carries the work type I last used on
     // it), name-ordered A–Z.
     static func build(from rows: [[String: Any]]) -> [SeveraProject] {
@@ -205,5 +235,8 @@ func _severaBuildSelfCheck() {
     assert(p[0].name == "Project Alpha", "sorted A–Z")
     assert(p[0].phases.count == 2, "two phases for Alpha")
     assert(p[1].phases.count == 1, "one phase for Beta (dupe collapsed)")
+    // keyword extraction drops generic words + numbers, keeps the distinctive token
+    assert(SeveraModel.keywords("Acme Consultancy 2026") == ["acme"], "customer token survives")
+    assert(SeveraModel.keywords("Globex - Development 1.10.2025-30.9.2026") == ["globex"], "dates/dev dropped")
 }
 #endif
