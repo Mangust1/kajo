@@ -37,7 +37,7 @@ func cleanedURL(_ raw: String) -> String? {
 
     let junkPrefixes = ["utm_", "pk_", "mc_", "vero_", "oly_", "fb_", "hsa_", "matomo_", "piwik_", "gad_"]
     let junk: Set<String> = ["fbclid", "gclid", "gclsrc", "dclid", "msclkid", "yclid", "twclid",
-                             "ttclid", "igsh", "igshid", "srsltid", "spm", "sk", "_hsenc", "_hsmi",
+                             "ttclid", "igsh", "igshid", "igsi", "srsltid", "spm", "sk", "_hsenc", "_hsmi",
                              "wt_mc", "cmpid", "ncid", "li_fat_id", "ref", "ref_src", "ref_url",
                              "soc_src", "soc_trk", "wickedid", "sms_source", "gbraid", "wbraid"]
     // Pure share-tracking on these hosts, but meaningful elsewhere — keep host-scoped.
