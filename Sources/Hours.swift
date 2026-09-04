@@ -50,9 +50,17 @@ struct TaskGroup: Identifiable {
     var seconds: TimeInterval { items.reduce(0) { $0 + $1.seconds } }
 }
 
-private let hoursDayFmt: DateFormatter    = { let f = DateFormatter(); f.dateFormat = "d.M."; return f }()
-private let hoursDayHdrFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "EEE d.M."; f.locale = Locale(identifier: "en_US"); return f }()
-private let hoursMonthFmt: DateFormatter  = { let f = DateFormatter(); f.dateFormat = "LLLL yyyy"; f.locale = Locale(identifier: "en_US"); return f }()
+// Days are bucketed in the TIMESHEET's timezone (severa.json "timeZone", default
+// Europe/Helsinki), not the Mac's. Keying days on the local zone meant travelling
+// re-keyed every uploaded bucket → re-upload duplicated rows in Severa, and evening
+// entries slid to the next day. Clock times (HH:mm) still display local.
+let hoursTZ: TimeZone = (loadConfigJSON("severa.json")["timeZone"] as? String).flatMap(TimeZone.init(identifier:))
+    ?? TimeZone(identifier: "Europe/Helsinki") ?? .current
+let hoursCal: Calendar = { var c = Calendar.current; c.timeZone = hoursTZ; return c }()
+
+private let hoursDayFmt: DateFormatter    = { let f = DateFormatter(); f.dateFormat = "d.M."; f.timeZone = hoursTZ; return f }()
+private let hoursDayHdrFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "EEE d.M."; f.locale = Locale(identifier: "en_US"); f.timeZone = hoursTZ; return f }()
+private let hoursMonthFmt: DateFormatter  = { let f = DateFormatter(); f.dateFormat = "LLLL yyyy"; f.locale = Locale(identifier: "en_US"); f.timeZone = hoursTZ; return f }()
 private let hoursTimeFmt: DateFormatter   = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f }()
 
 // Round decimal hours UP to the next `minutes`-step (Severa bills in fixed steps).
@@ -88,13 +96,20 @@ final class HoursModel: ObservableObject {
     @Published private(set) var tick = Date()               // drives the live elapsed readout
     @Published var month = HoursModel.monthStart(Date())    // month shown in the log
     @Published private var uploads: [String: UploadRecord] = [:]   // bucketKey -> what's on Severa
+    @Published var warning: String?                          // e.g. the log file was unreadable
 
     private let url = URL(fileURLWithPath: kajoConfigDir + "/hours.json")
-    private let uploadsKey = "hours.uploads.v1"
+    // Upload records live NEXT TO the log (not UserDefaults): a restore/reinstall that
+    // brings back hours.json without them would re-POST every day as new.
+    private let uploadsURL = URL(fileURLWithPath: kajoConfigDir + "/hours-uploads.json")
+    private let legacyUploadsKey = "hours.uploads.v1"
     private var ticker: Timer?
 
     static func bucketKey(_ day: Date, _ phaseGuid: String, _ wtGuid: String) -> String {
-        "\(Int(Calendar.current.startOfDay(for: day).timeIntervalSinceReferenceDate))|\(phaseGuid)|\(wtGuid)"
+        "\(Int(hoursCal.startOfDay(for: day).timeIntervalSinceReferenceDate))|\(phaseGuid)|\(wtGuid)"
+    }
+    private static func bucketDay(_ key: String) -> Date? {
+        key.split(separator: "|").first.flatMap { Double($0) }.map { Date(timeIntervalSinceReferenceDate: $0) }
     }
     // Has this entry been pushed to Severa? (its bucket has an upload record)
     func isUploaded(_ e: TimeEntry) -> Bool {
@@ -107,13 +122,18 @@ final class HoursModel: ObservableObject {
     init() {
         try? FileManager.default.createDirectory(atPath: kajoConfigDir, withIntermediateDirectories: true)
         load()
-        if let d = UserDefaults.standard.data(forKey: uploadsKey),
-           let m = try? JSONDecoder().decode([String: UploadRecord].self, from: d) { uploads = m }
+        if let d = try? Data(contentsOf: uploadsURL),
+           let m = try? JSONDecoder().decode([String: UploadRecord].self, from: d) {
+            uploads = m
+        } else if let d = UserDefaults.standard.data(forKey: legacyUploadsKey),
+                  let m = try? JSONDecoder().decode([String: UploadRecord].self, from: d) {
+            uploads = m; saveUploads()                        // one-time migration to the file
+        }
         if running != nil { startTicker() }
     }
 
     static func monthStart(_ d: Date) -> Date {
-        Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: d)) ?? d
+        hoursCal.date(from: hoursCal.dateComponents([.year, .month], from: d)) ?? d
     }
 
     // MARK: start / stop / resume
@@ -134,16 +154,15 @@ final class HoursModel: ObservableObject {
         if entries[i].seconds < 1 { entries.remove(at: i) }   // discard accidental taps
         save(); stopTicker()
     }
+    // Resume carries the source entry's project·phase (or its absence) onto the new session.
     func resume(_ e: TimeEntry) {
         stop()
-        if let pg = e.projectGuid { draftProject = SeveraProject(guid: pg, name: e.projectName ?? "—", phases: []) }
-        if let hg = e.phaseGuid {
-            draftPhase = SeveraPhase(guid: hg, name: e.phaseName ?? "—",
-                                     workTypeGuid: e.workTypeGuid, workTypeName: e.workTypeName)
+        draftProject = e.projectGuid.map { SeveraProject(guid: $0, name: e.projectName ?? "—", phases: []) }
+        draftPhase = e.phaseGuid.map {
+            SeveraPhase(guid: $0, name: e.phaseName ?? "—", workTypeGuid: e.workTypeGuid, workTypeName: e.workTypeName)
         }
         start(task: e.task)
     }
-    func resume(task: String) { stop(); start(task: task) }   // group resume: keeps current sticky selection
 
     // MARK: edit / delete / add
     func update(_ e: TimeEntry) {
@@ -166,7 +185,7 @@ final class HoursModel: ObservableObject {
     }
     @discardableResult func addManual() -> TimeEntry {
         // default: a 1-hour block ending now (or noon on the last day of the viewed month)
-        let cal = Calendar.current
+        let cal = hoursCal
         let anchor: Date = cal.isDate(Date(), equalTo: month, toGranularity: .month)
             ? Date()
             : (cal.date(byAdding: .month, value: 1, to: month)?.addingTimeInterval(-43200) ?? month)
@@ -176,17 +195,17 @@ final class HoursModel: ObservableObject {
     }
 
     // MARK: month view
-    func shiftMonth(_ d: Int) { month = Calendar.current.date(byAdding: .month, value: d, to: month) ?? month }
-    private func inMonth(_ e: TimeEntry) -> Bool { Calendar.current.isDate(e.start, equalTo: month, toGranularity: .month) }
+    func shiftMonth(_ d: Int) { month = hoursCal.date(byAdding: .month, value: d, to: month) ?? month }
+    private func inMonth(_ e: TimeEntry) -> Bool { hoursCal.isDate(e.start, equalTo: month, toGranularity: .month) }
     func monthSeconds() -> TimeInterval { entries.filter(inMonth).reduce(0) { $0 + $1.seconds } }
     func daySeconds(_ day: Date) -> TimeInterval {
-        entries.filter { Calendar.current.isDate($0.start, inSameDayAs: day) }.reduce(0) { $0 + $1.seconds }
+        entries.filter { hoursCal.isDate($0.start, inSameDayAs: day) }.reduce(0) { $0 + $1.seconds }
     }
     // completed entries in the viewed month, grouped by day (newest day first), then by task
     // within each day (same task done several times collapses to one group). Running one lives in the card.
     func days() -> [(day: Date, groups: [TaskGroup])] {
         let logged = entries.filter { $0.end != nil && inMonth($0) }
-        let byDay = Dictionary(grouping: logged) { Calendar.current.startOfDay(for: $0.start) }
+        let byDay = Dictionary(grouping: logged) { hoursCal.startOfDay(for: $0.start) }
         return byDay.keys.sorted(by: >).map { day in
             var order: [String] = []                 // preserve most-recent-session-first order
             var map: [String: [TimeEntry]] = [:]
@@ -204,7 +223,7 @@ final class HoursModel: ObservableObject {
         struct Key: Hashable { let day: Date; let task: String }
         var sum: [Key: TimeInterval] = [:], first: [Key: Date] = [:]
         for e in rows {
-            let k = Key(day: Calendar.current.startOfDay(for: e.start), task: e.task)
+            let k = Key(day: hoursCal.startOfDay(for: e.start), task: e.task)
             sum[k, default: 0] += e.seconds
             first[k] = min(first[k] ?? e.start, e.start)
         }
@@ -226,16 +245,22 @@ final class HoursModel: ObservableObject {
     // changed since last upload (PATCH the existing Severa row). Already-synced,
     // unchanged buckets are omitted. Pass a `day` to scope to that day.
     // The running entry (end == nil) is never included.
+    // Kajo never deletes in Severa: a bucket that was uploaded but no longer exists (its
+    // entries were re-assigned, moved to another day, or deleted) is NOT touched — it's
+    // surfaced by staleUploads(day:) so you can fix the row in Severa yourself.
     func pendingUploads(day: Date? = nil, roundMinutes: Int = 30) -> [WorkHourPost] {
+        func inScope(_ d: Date) -> Bool {
+            day == nil ? hoursCal.isDate(d, equalTo: month, toGranularity: .month) : hoursCal.isDate(d, inSameDayAs: day!)
+        }
         let rows = entries.filter { e in
             guard e.end != nil, e.phaseGuid != nil, e.workTypeGuid != nil else { return false }
-            return day == nil ? inMonth(e) : Calendar.current.isDate(e.start, inSameDayAs: day!)
+            return inScope(e.start)
         }
         struct Key: Hashable { let day: Date; let phase: String; let wt: String }
         var order: [Key] = []
         var bucket: [Key: [TimeEntry]] = [:]
         for e in rows {
-            let k = Key(day: Calendar.current.startOfDay(for: e.start), phase: e.phaseGuid!, wt: e.workTypeGuid!)
+            let k = Key(day: hoursCal.startOfDay(for: e.start), phase: e.phaseGuid!, wt: e.workTypeGuid!)
             if bucket[k] == nil { order.append(k) }
             bucket[k, default: []].append(e)
         }
@@ -249,24 +274,44 @@ final class HoursModel: ObservableObject {
             }
             let desc = descs.joined(separator: ", ")
             let bk = Self.bucketKey(k.day, k.phase, k.wt)
-            if let rec = uploads[bk], rec.hours == hours, rec.desc == desc { return nil }   // already synced, unchanged
+            if let rec = uploads[bk] {
+                if rec.guid.isEmpty { return nil }                      // uploaded but Severa gave no id → can't PATCH; fix there
+                if rec.hours == hours, rec.desc == desc { return nil }  // already synced, unchanged
+            }
             return WorkHourPost(key: bk, eventDate: k.day, phaseGuid: k.phase,
                                 phaseName: items.first?.phaseName ?? "—", workTypeGuid: k.wt,
                                 hours: hours, description: desc,
                                 sourceIDs: items.map { $0.id }, existingGuid: uploads[bk]?.guid)
         }
     }
-    // Completed entries with no phase assigned (can't upload).
+    // Upload records for `day` whose bucket no longer exists in the log — those Severa
+    // rows still carry the old hours. Shown as a ⚠ so you can correct them in Severa;
+    // once done, forgetUpload(key:) clears the marker.
+    func staleUploads(day: Date) -> [(key: String, desc: String, hours: Double)] {
+        let live = Set(entries.compactMap { e -> String? in
+            guard e.end != nil, let p = e.phaseGuid, let w = e.workTypeGuid else { return nil }
+            return Self.bucketKey(e.start, p, w)
+        })
+        return uploads.compactMap { bk, rec in
+            guard !live.contains(bk), let d = Self.bucketDay(bk), hoursCal.isDate(d, inSameDayAs: day) else { return nil }
+            return (bk, rec.desc, rec.hours)
+        }.sorted { $0.key < $1.key }
+    }
+    func forgetUpload(key: String) { uploads[key] = nil; saveUploads() }
+    // Completed entries that can't upload: no phase, or a phase with no work type.
     func unassignedCount(day: Date? = nil) -> Int {
         entries.filter { e in
-            guard e.end != nil, e.phaseGuid == nil else { return false }
-            return day == nil ? inMonth(e) : Calendar.current.isDate(e.start, inSameDayAs: day!)
+            guard e.end != nil, e.phaseGuid == nil || e.workTypeGuid == nil else { return false }
+            return day == nil ? inMonth(e) : hoursCal.isDate(e.start, inSameDayAs: day!)
         }.count
     }
     // Record a successful POST/PATCH so re-uploads update instead of duplicating.
     func recordUpload(_ p: WorkHourPost, guid: String) {
         uploads[p.key] = UploadRecord(guid: guid, hours: p.hours, desc: p.description)
-        if let d = try? JSONEncoder().encode(uploads) { UserDefaults.standard.set(d, forKey: uploadsKey) }
+        saveUploads()
+    }
+    private func saveUploads() {
+        if let d = try? JSONEncoder().encode(uploads) { try? writePrivate(d, to: uploadsURL) }
     }
 
     // MARK: ticker + persistence
@@ -277,31 +322,44 @@ final class HoursModel: ObservableObject {
     private func stopTicker() { ticker?.invalidate(); ticker = nil }
 
     private func load() {
-        guard let d = try? Data(contentsOf: url),
-              let a = try? JSONDecoder().decode([TimeEntry].self, from: d) else { return }
+        guard let d = try? Data(contentsOf: url) else { return }             // no file yet = fresh start
+        guard let a = try? JSONDecoder().decode([TimeEntry].self, from: d) else {
+            // Unreadable log: set it aside instead of silently starting empty — the next
+            // save() would otherwise overwrite months of history with one entry.
+            let aside = url.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
+            try? FileManager.default.moveItem(at: url, to: aside)
+            warning = "hours.json was unreadable — moved to \(aside.lastPathComponent)"
+            return
+        }
         entries = a.sorted { $0.start > $1.start }
     }
     private func save() {
         entries.sort { $0.start > $1.start }
-        if let d = try? JSONEncoder().encode(entries) { try? d.write(to: url) }
+        guard let d = try? JSONEncoder().encode(entries) else { return }
+        do { try writePrivate(d, to: url) } catch { warning = "Couldn't save hours.json: \(error.localizedDescription)" }
     }
 }
 
 struct HoursTab: View {
     @ObservedObject var model: HoursModel
-    @StateObject private var severa = SeveraModel()
+    @ObservedObject var severa: SeveraModel      // app-lifetime (owned by PanelController), not per tab visit
     @State private var editingID: UUID?
+    @State private var newEntryID: UUID?          // a just-added manual entry: Cancel removes it again
     @State private var copiedTag: String?
     @State private var expanded: Set<String> = []          // group ids showing their sessions
     @State private var draftEntry = TimeEntry(task: "", start: Date(), end: Date())
     @State private var confirmDay: Date?          // day pending upload confirmation
     @State private var uploading = false
     @State private var uploadMsg: String?
+    @State private var uploadMsgID = UUID()       // so an older message's auto-clear can't wipe a newer one
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             tracker
             monthBar
+            if let w = model.warning {
+                Text(w).font(.system(size: 11)).foregroundColor(Gruv.red)
+            }
             if let m = uploadMsg {
                 Text(m).font(.system(size: 11))
                     .foregroundColor(m.hasPrefix("✓") ? Gruv.green : Gruv.red)
@@ -381,7 +439,7 @@ struct HoursTab: View {
                 .buttonStyle(.plain).foregroundColor(Gruv.fg2).help("Open in a window (park it next to your browser)")
             Button { model.copyMonth() } label: { Image(systemName: "doc.on.doc") }
                 .buttonStyle(.plain).foregroundColor(Gruv.fg2).help("Copy month for Severa")
-            Button { let e = model.addManual(); draftEntry = e; editingID = e.id } label: { Image(systemName: "plus") }
+            Button { let e = model.addManual(); draftEntry = e; editingID = e.id; newEntryID = e.id } label: { Image(systemName: "plus") }
                 .buttonStyle(.plain).foregroundColor(Gruv.green).help("Add entry manually")
         }
         .confirmationDialog(uploadPrompt, isPresented: Binding(get: { confirmDay != nil }, set: { if !$0 { confirmDay = nil } }), titleVisibility: .visible) {
@@ -415,8 +473,10 @@ struct HoursTab: View {
             else { fail += 1 }
         }
         uploading = false
-        uploadMsg = fail == 0 ? "✓ Synced \(ok) to Severa (\(hoursDayFmt.string(from: day)))" : "Synced \(ok), \(fail) failed"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { if uploadMsg != nil { uploadMsg = nil } }
+        let why = severa.lastError.map { " — \($0)" } ?? ""
+        uploadMsg = fail == 0 ? "✓ Synced \(ok) to Severa (\(hoursDayFmt.string(from: day)))" : "Synced \(ok), \(fail) failed\(why)"
+        let id = UUID(); uploadMsgID = id
+        DispatchQueue.main.asyncAfter(deadline: .now() + (fail == 0 ? 4 : 10)) { if uploadMsgID == id { uploadMsg = nil } }
     }
 
     private var log: some View {
@@ -431,6 +491,7 @@ struct HoursTab: View {
                         Text(hoursDayHdrFmt.string(from: grp.day)).font(.system(size: 11, weight: .semibold)).foregroundColor(Gruv.fg4)
                         Spacer()
                         Text(durText(model.daySeconds(grp.day))).font(.system(size: 11)).foregroundColor(Gruv.fg4)
+                        if severa.configured { staleMarker(grp.day) }
                         if severa.configured && !model.pendingUploads(day: grp.day, roundMinutes: severa.roundUpMinutes).isEmpty {
                             Button { confirmDay = grp.day } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 12)) }
                                 .buttonStyle(.plain).foregroundColor(Gruv.blue).disabled(uploading)
@@ -444,6 +505,25 @@ struct HoursTab: View {
             .padding(.bottom, 8)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    // ⚠ on a day whose uploaded Severa row(s) no longer match the log (entries re-assigned,
+    // moved or deleted after upload). Kajo won't touch those rows — hover for what to fix
+    // in Severa; the menu forgets a marker once you've done that.
+    @ViewBuilder private func staleMarker(_ day: Date) -> some View {
+        let stale = model.staleUploads(day: day)
+        if !stale.isEmpty {
+            Menu {
+                Text("Uploaded rows that no longer match this day's log. Fix them in Severa, then forget the marker:")
+                ForEach(stale, id: \.key) { s in
+                    Button("Forget “\(s.desc.isEmpty ? "—" : s.desc)” (\(decimalHours(s.hours * 3600)) h)") { model.forgetUpload(key: s.key) }
+                }
+            } label: {
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11)).foregroundColor(Gruv.yellow)
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .help("\(stale.count) uploaded Severa row\(stale.count == 1 ? "" : "s") no longer match this day — adjust in Severa")
+        }
     }
 
     // copy `text` to the pasteboard with a 1 s ✓ flash, disambiguated by `tag` (entry id or group id)
@@ -531,7 +611,7 @@ struct HoursTab: View {
             Spacer()
             Text(durText(g.seconds)).font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundColor(Gruv.fg2)
             copyButton(g.task, tag: g.id)
-            Button { model.resume(task: g.task) } label: { Image(systemName: "arrow.clockwise") }
+            Button { if let e = g.items.first { model.resume(e) } } label: { Image(systemName: "arrow.clockwise") }
                 .buttonStyle(.plain).foregroundColor(Gruv.blue).help("Resume this task")
         }
         .padding(10).background(Gruv.bg1).cornerRadius(8)
@@ -583,7 +663,9 @@ struct HoursTab: View {
     @FocusState private var focus: EditField?
 
     private func editor(_ e: TimeEntry, showProject: Bool = true) -> some View {
-        func commit() { model.update(draftEntry); editingID = nil; focus = nil }
+        func commit() { model.update(draftEntry); editingID = nil; newEntryID = nil; focus = nil }
+        // Cancelling a freshly added (+) entry removes it — otherwise a 1 h "—" ghost inflates the totals.
+        func cancel() { if e.id == newEntryID { model.delete(e) }; editingID = nil; newEntryID = nil; focus = nil }
         return VStack(alignment: .leading, spacing: 8) {
             TextField("Task", text: $draftEntry.task)
                 .textFieldStyle(.roundedBorder)
@@ -609,7 +691,7 @@ struct HoursTab: View {
                 Button { model.delete(e); editingID = nil } label: { Image(systemName: "trash").foregroundColor(Gruv.red) }
                     .buttonStyle(.plain).help("Delete")
                 Spacer()
-                Button("Cancel") { editingID = nil; focus = nil }.buttonStyle(.plain).foregroundColor(Gruv.fg4)
+                Button("Cancel", action: cancel).buttonStyle(.plain).foregroundColor(Gruv.fg4)
                 Button("Save", action: commit).buttonStyle(.plain).foregroundColor(Gruv.green)
                     .keyboardShortcut(.defaultAction)     // Enter saves from any field, incl. the date pickers
             }

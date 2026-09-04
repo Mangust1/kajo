@@ -50,6 +50,7 @@ final class PiModel: ObservableObject {
     private var local = "", remote = "", remoteHeader = "X-Kajo-Token", remoteToken = ""
     private var session: URLSession!
     private var timer: Timer?
+    private var inFlight = false
     // A cloud snapshot older than this means the Pi stopped pushing → it's down.
     static let staleAfter: TimeInterval = 150
 
@@ -65,11 +66,8 @@ final class PiModel: ObservableObject {
     }
 
     private func loadConfig() {
-        let path = kajoConfigDir + "/pi.json"
-        guard let data = FileManager.default.contents(atPath: path),
-              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            configured = false; return
-        }
+        let j = loadConfigJSON("pi.json")
+        guard !j.isEmpty else { configured = false; return }
         // `local` (LAN) with `url` accepted as a legacy alias; `remote` (CloudFront) optional.
         local = (j["local"] as? String ?? j["url"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         remote = (j["remote"] as? String ?? "").trimmingCharacters(in: .whitespaces)
@@ -86,14 +84,15 @@ final class PiModel: ObservableObject {
     func stopPolling() { timer?.invalidate(); timer = nil }
 
     func refresh() {
-        guard configured else { return }
-        loading = true
+        guard configured, !inFlight else { return }   // LAN timeout + cloud timeout can exceed the 5 s tick
+        loading = true; inFlight = true
         // LAN first (live, fast). Fall back to the CloudFront snapshot when away.
         fetch(local, timeoutOverride: 2.5) { [weak self] lan in
             guard let self else { return }
             if var s = lan { s.source = "lan"; self.apply(s); return }
-            guard !self.remote.isEmpty else { self.markUnreachable(); return }
-            var req = URLRequest(url: URL(string: self.remote)!)
+            // A malformed `remote` in pi.json is a config error, not a reason to crash every 5 s.
+            guard !self.remote.isEmpty, let remoteURL = URL(string: self.remote) else { self.markUnreachable(); return }
+            var req = URLRequest(url: remoteURL)
             if !self.remoteToken.isEmpty { req.setValue(self.remoteToken, forHTTPHeaderField: self.remoteHeader) }
             self.fetch(req) { cloud in
                 if var s = cloud { s.source = "cloud"; self.apply(s) }
@@ -110,7 +109,7 @@ final class PiModel: ObservableObject {
             s.reachable = false
         }
         DispatchQueue.main.async {
-            self.loading = false
+            self.loading = false; self.inFlight = false
             self.everLoaded = true
             self.status = s
             if let enc = try? JSONEncoder().encode(s) {
@@ -121,7 +120,7 @@ final class PiModel: ObservableObject {
 
     private func markUnreachable() {
         DispatchQueue.main.async {
-            self.loading = false
+            self.loading = false; self.inFlight = false
             self.everLoaded = true
             self.status.reachable = false       // keep cached metrics, just flag offline
             self.status.source = ""
@@ -351,12 +350,5 @@ struct PiTab: View {
         let d = s / 86400, h = (s % 86400) / 3600, m = (s % 3600) / 60
         if d > 0 { return "\(d)d \(h)h" }
         return h > 0 ? "\(h)h \(m)m" : "\(m)m"
-    }
-
-    private func hint(_ title: String, _ sub: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.headline).foregroundStyle(Gruv.fg2)
-            Text(sub).font(.callout).foregroundStyle(Gruv.gray)
-        }.padding(.top, 8)
     }
 }

@@ -41,6 +41,7 @@ struct PanelView: View {
     @ObservedObject var clipboard: ClipboardModel
     @ObservedObject var currency: CurrencyModel
     @ObservedObject var hours: HoursModel
+    @ObservedObject var severa: SeveraModel
 
     var body: some View {
         HStack(spacing: 0) {
@@ -90,7 +91,7 @@ struct PanelView: View {
                 case .memes:    MemesTab(model: memes)
                 case .clipboard: ClipboardTab(model: clipboard)
                 case .currency: CurrencyTab(model: currency)
-                case .hours:    HoursTab(model: hours)
+                case .hours:    HoursTab(model: hours, severa: severa)
                 }
             }
             .padding(.horizontal, 18)
@@ -168,6 +169,7 @@ final class PanelController {
     let clipboard = ClipboardModel()
     let currency = CurrencyModel()
     let hours = HoursModel()
+    let severa = MainActor.assumeIsolated { SeveraModel() }   // app-lifetime: token + project cache survive tab switches
     private let panel: FloatingPanel
     private var clickMonitor: Any?
     private var keyMonitor: Any?
@@ -186,7 +188,7 @@ final class PanelController {
         visual.layer?.masksToBounds = true
         visual.frame = NSRect(origin: .zero, size: size)
 
-        let hosting = NSHostingView(rootView: PanelView(state: state, weather: weather, events: events, timer: timer, nowPlaying: nowPlaying, sound: sound, bluetooth: bluetooth, power: power, network: network, unifi: unifi, vpn: vpn, ha: ha, pi: pi, ai: ai, system: system, memes: memes, clipboard: clipboard, currency: currency, hours: hours))
+        let hosting = NSHostingView(rootView: PanelView(state: state, weather: weather, events: events, timer: timer, nowPlaying: nowPlaying, sound: sound, bluetooth: bluetooth, power: power, network: network, unifi: unifi, vpn: vpn, ha: ha, pi: pi, ai: ai, system: system, memes: memes, clipboard: clipboard, currency: currency, hours: hours, severa: severa))
         hosting.frame = visual.bounds
         hosting.autoresizingMask = [.width, .height]
         visual.addSubview(hosting)
@@ -243,8 +245,8 @@ final class PanelController {
     }
 
     func toggle(tab: Tab) {
-        if panel.isVisible && state.tab == tab {
-            hide()
+        if panel.isVisible {
+            if state.tab == tab { hide() } else { state.tab = tab }   // already open: just switch, don't replay the drop
         } else {
             state.tab = tab
             show()
@@ -332,6 +334,7 @@ final class PanelController {
         vpn.stopPolling()
         ha.stopPolling()
         pi.stopPolling()
+        ai.stopPolling()
     }
 
     private func topRightOrigin() -> NSPoint {

@@ -160,7 +160,10 @@ final class ClipboardModel: ObservableObject {
         let base = URL(fileURLWithPath: kajoConfigDir).appendingPathComponent("clipboard")
         filesDir = base.appendingPathComponent("files")
         indexURL = base.appendingPathComponent("index.json")
-        try? FileManager.default.createDirectory(at: filesDir, withIntermediateDirectories: true)
+        // Owner-only: the history is your clipboard in plaintext.
+        try? FileManager.default.createDirectory(at: filesDir, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: base.path)
         // clipboard.json (optional): historyCap, secretTTLSeconds, maxImageMB, nvrPath, nvimSocket, kdeconnectCli, kdeconnectDeviceId
         let cfg = (try? Data(contentsOf: URL(fileURLWithPath: kajoConfigDir + "/clipboard.json")))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
@@ -224,8 +227,12 @@ final class ClipboardModel: ObservableObject {
 
     private func imageData(_ pb: NSPasteboard) -> (Data, String)? {
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
-           let u = urls.first(where: { Self.imgExts.contains($0.pathExtension.lowercased()) }),
-           let d = try? Data(contentsOf: u) { return (d, u.pathExtension.lowercased()) }
+           let u = urls.first(where: { Self.imgExts.contains($0.pathExtension.lowercased()) }) {
+            // Check the size BEFORE reading: Cmd-C on a 500 MB PNG in Finder used to read it all on the main thread.
+            let size = (try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            guard size <= maxImageBytes, let d = try? Data(contentsOf: u) else { return nil }
+            return (d, u.pathExtension.lowercased())
+        }
         if let gif = pb.data(forType: Self.gifType) { return (gif, "gif") }
         if let png = pb.data(forType: .png) { return (png, "png") }
         if let tiff = pb.data(forType: .tiff) ?? NSImage(pasteboard: pb)?.tiffRepresentation,
@@ -316,18 +323,22 @@ final class ClipboardModel: ObservableObject {
         persist()
     }
 
-    // Text → a new nvim tab (replaces Hammerspoon Hyper+V).
+    // Text → a new nvim tab (replaces Hammerspoon Hyper+V). Works for secrets too — the
+    // hand-off file is owner-only and removed once nvim has read it (it used to stay in
+    // $TMPDIR, world-readable, forever).
     func pasteToVim(_ it: ClipItem) {
         guard it.kind == .text, let text = it.text else { return }
         let sock = nvimSocket
         guard FileManager.default.fileExists(atPath: sock) else { return }
-        let tmp = NSTemporaryDirectory() + "kajo-clip-\(UUID().uuidString.prefix(6)).txt"
-        try? text.write(toFile: tmp, atomically: true, encoding: .utf8)
-        let nvr = nvrPath
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory() + "kajo-clip-\(UUID().uuidString.prefix(6)).txt")
+        guard (try? writePrivate(Data(text.utf8), to: tmp)) != nil else { return }
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = ["-lc", "'\(nvr)' --servername '\(sock)' --remote-tab-silent '\(tmp)'"]
-        try? p.run()
+        p.executableURL = URL(fileURLWithPath: nvrPath)          // direct exec: no shell, no quoting to break out of
+        p.arguments = ["--servername", sock, "--remote-tab-silent", tmp.path]
+        p.terminationHandler = { _ in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5) { try? FileManager.default.removeItem(at: tmp) }
+        }
+        do { try p.run() } catch { try? FileManager.default.removeItem(at: tmp) }
     }
 
     // Text → the Android device's clipboard via KDE Connect (copy-style: item also
@@ -335,20 +346,21 @@ final class ClipboardModel: ObservableObject {
     func sendToThor(_ it: ClipItem) {
         guard it.kind == .text, !it.secret else { return }
         select(it)
-        guard FileManager.default.fileExists(atPath: kdeconnectCli) else { return }
-        let dev = kdeconnectDevice.isEmpty
-            ? "$('\(kdeconnectCli)' --list-available --id-only | head -n1)"
-            : "'\(kdeconnectDevice)'"
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = ["-lc", "'\(kdeconnectCli)' -d \(dev) --send-clipboard"]
-        try? p.run()
+        let cli = kdeconnectCli, configured = kdeconnectDevice
+        guard FileManager.default.fileExists(atPath: cli) else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let dev = configured.isEmpty
+                ? (shell(cli, ["--list-available", "--id-only"]) ?? "").split(separator: "\n").first.map(String.init) ?? ""
+                : configured
+            guard !dev.isEmpty else { return }
+            _ = shell(cli, ["-d", dev, "--send-clipboard"])
+        }
     }
 
-    // Persist NON-secret items only — secrets never touch disk.
+    // Persist NON-secret items only — secrets never touch disk. Atomic + 0600.
     private func persist() {
         let durable = items.filter { $0.expiresAt == nil && !$0.secret }
-        if let data = try? JSONEncoder().encode(durable) { try? data.write(to: indexURL) }
+        if let data = try? JSONEncoder().encode(durable) { try? writePrivate(data, to: indexURL) }
     }
 
     private func load() {
@@ -388,18 +400,21 @@ struct ClipboardTab: View {
     @ObservedObject var model: ClipboardModel
 
     var body: some View {
+        // Fuzzy-score once per render, not once per row (it was ~2 full passes per row).
+        let f = model.filtered
+        let selID = model.selectedItem?.id
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(Gruv.fg4)
                 FocusedTextField(text: $model.search, placeholder: "Search clipboard…",
                                  onSubmit: { if let it = model.selectedItem { pick(it) } })
-                Text("\(model.filtered.count)").font(.caption2).foregroundStyle(Gruv.gray)
+                Text("\(f.count)").font(.caption2).foregroundStyle(Gruv.gray)
             }
             .padding(8)
             .background(RoundedRectangle(cornerRadius: 8).fill(Gruv.bg1.opacity(0.6)))
             .onAppear { model.sel = 0 }
 
-            if model.filtered.isEmpty {
+            if f.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "doc.on.clipboard").font(.title2).foregroundStyle(Gruv.fg4)
                     Text(model.items.isEmpty ? "Copy something — it shows up here" : "No match")
@@ -409,7 +424,7 @@ struct ClipboardTab: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 4) {
-                            ForEach(model.filtered) { row($0) }
+                            ForEach(f) { row($0, selected: $0.id == selID) }
                         }.padding(.vertical, 2)
                     }
                     .onChange(of: model.sel) { _, _ in
@@ -422,7 +437,7 @@ struct ClipboardTab: View {
         }
     }
 
-    private func row(_ it: ClipItem) -> some View {
+    private func row(_ it: ClipItem, selected: Bool) -> some View {
         HStack(spacing: 8) {
             if it.kind == .image, let f = it.file {
                 MemeThumb(url: model.fileURL(f))
@@ -456,8 +471,8 @@ struct ClipboardTab: View {
         }
         .padding(.vertical, 5).padding(.horizontal, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 6).fill(it.id == model.selectedItem?.id ? Gruv.yellow.opacity(0.18) : Gruv.bg1.opacity(0.35)))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(it.id == model.selectedItem?.id ? Gruv.yellow.opacity(0.7) : .clear, lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Gruv.yellow.opacity(0.18) : Gruv.bg1.opacity(0.35)))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(selected ? Gruv.yellow.opacity(0.7) : .clear, lineWidth: 1))
         .contentShape(Rectangle())
         .onTapGesture { pick(it) }
         .contextMenu {

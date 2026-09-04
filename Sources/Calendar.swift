@@ -23,7 +23,7 @@ struct WorldCity: Identifiable {
     let lat: Double
     let lon: Double
     var id: String { name }
-    var tz: TimeZone { TimeZone(identifier: tzID)! }
+    var tz: TimeZone { TimeZone(identifier: tzID) ?? .current }   // tzID is validated at parse time
 }
 
 // calendar.json (optional): { "homeTimezone": "...", "cities": [{name,tz,lat,lon}…] }
@@ -45,7 +45,7 @@ let worldCities: [WorldCity] = {
     ]
     guard let arr = calendarCfg["cities"] as? [[String: Any]] else { return defaults }
     let parsed = arr.compactMap { d -> WorldCity? in
-        guard let n = d["name"] as? String, let tz = d["tz"] as? String,
+        guard let n = d["name"] as? String, let tz = d["tz"] as? String, TimeZone(identifier: tz) != nil,  // a typo'd zone is skipped, not a crash loop
               let la = d["lat"] as? Double, let lo = d["lon"] as? Double else { return nil }
         return WorldCity(name: n, tzID: tz, lat: la, lon: lo)
     }
@@ -153,10 +153,17 @@ final class EventsModel: ObservableObject {
                 if granted { self?.load() }
             }
         }
-        if #available(macOS 14.0, *) {
-            store.requestFullAccessToEvents { granted, _ in done(granted) }
-        } else {
-            store.requestAccess(to: .event) { granted, _ in done(granted) }
+        // Only prompt while undetermined; otherwise report the current state (write-only
+        // access, set in System Settings, is "denied" for reading — say so instead of re-asking).
+        switch EKEventStore.authorizationStatus(for: .event) {
+        case .notDetermined:
+            if #available(macOS 14.0, *) {
+                store.requestFullAccessToEvents { granted, _ in done(granted) }
+            } else {
+                store.requestAccess(to: .event) { granted, _ in done(granted) }
+            }
+        case .fullAccess, .authorized: done(true)
+        default: done(false)
         }
     }
 
@@ -165,7 +172,16 @@ final class EventsModel: ObservableObject {
         let start = Date()
         guard let end = cal.date(byAdding: .day, value: 7, to: cal.startOfDay(for: start)) else { return }
         let pred = store.predicateForEvents(withStart: start, end: end, calendars: nil)
-        let evs = store.events(matching: pred)
+        // Off the main thread: with several subscribed calendars this query is a visible hitch on panel show.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let found = self.store.events(matching: pred)
+            DispatchQueue.main.async { self.events = Self.convert(found) }
+        }
+    }
+
+    private static func convert(_ found: [EKEvent]) -> [CalEvent] {
+        found
             .sorted { $0.startDate < $1.startDate }
             .prefix(3)
             .map { e -> CalEvent in
@@ -175,8 +191,6 @@ final class EventsModel: ObservableObject {
                                 title: e.title ?? "(no title)",
                                 start: e.startDate, allDay: e.isAllDay, color: col)
             }
-        let out = Array(evs)
-        DispatchQueue.main.async { self.events = out }
     }
 }
 
@@ -357,15 +371,21 @@ struct WorldClocksView: View {
         }
     }
 
-    private func timeString(_ tz: TimeZone, _ now: Date) -> String {
-        let f = DateFormatter(); f.timeZone = tz; f.dateFormat = "HH:mm"
-        return f.string(from: now)
+    // One formatter per (zone, pattern), reused every second — allocating two per city per tick added up.
+    private static var fmts: [String: DateFormatter] = [:]
+    private static func fmt(_ tz: TimeZone, _ pattern: String) -> DateFormatter {
+        let k = tz.identifier + pattern
+        if let f = fmts[k] { return f }
+        let f = DateFormatter(); f.timeZone = tz; f.dateFormat = pattern
+        fmts[k] = f
+        return f
     }
+
+    private func timeString(_ tz: TimeZone, _ now: Date) -> String { Self.fmt(tz, "HH:mm").string(from: now) }
 
     private func subtitle(_ city: WorldCity, now: Date) -> String {
         if city.tzID == home.identifier { return "home" }
         let diff = (city.tz.secondsFromGMT(for: now) - home.secondsFromGMT(for: now)) / 3600
-        let dayF = DateFormatter(); dayF.timeZone = city.tz; dayF.dateFormat = "EEE"
-        return "\(dayF.string(from: now)) · \(diff >= 0 ? "+" : "")\(diff)h"
+        return "\(Self.fmt(city.tz, "EEE").string(from: now)) · \(diff >= 0 ? "+" : "")\(diff)h"
     }
 }

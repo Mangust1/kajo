@@ -229,10 +229,16 @@ final class BluetoothModel: ObservableObject {
     @Published var busy: Set<String> = []
 
     private let tool = "/opt/homebrew/bin/blueutil"
+    private var refreshing = false
+    // system_profiler takes 1–3 s of CPU; battery levels don't move that fast.
+    private var batteryCache: (levels: [String: BTBattery], at: Date)?
 
     func refresh() {
+        guard !refreshing else { return }
+        refreshing = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
+            defer { DispatchQueue.main.async { self.refreshing = false } }
             var found: [BTDevice] = []
             if let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] {
                 // 0x04 = Audio major class → AirPods, headphones, speakers only.
@@ -245,7 +251,9 @@ final class BluetoothModel: ObservableObject {
             DispatchQueue.main.async { self.devices = found }
 
             // Battery via system_profiler (~1s) — fetched after devices show, then merged in.
-            let batteries = self.batteryLevels()
+            let batteries: [String: BTBattery]
+            if let c = self.batteryCache, Date().timeIntervalSince(c.at) < 60 { batteries = c.levels }
+            else { batteries = self.batteryLevels(); self.batteryCache = (batteries, Date()) }
             DispatchQueue.main.async {
                 for i in self.devices.indices {
                     self.devices[i].battery = batteries[Self.normAddr(self.devices[i].id)]
@@ -256,6 +264,8 @@ final class BluetoothModel: ObservableObject {
 
     func toggle(_ d: BTDevice) {
         guard !busy.contains(d.id) else { return }
+        // No blueutil → do nothing, rather than reading its missing output as "disconnected".
+        guard FileManager.default.isExecutableFile(atPath: tool) else { return }
         busy.insert(d.id)
         let flag = d.connected ? "--disconnect" : "--connect"
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -273,16 +283,7 @@ final class BluetoothModel: ObservableObject {
         }
     }
 
-    private func run(_ args: [String]) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: args[0])
-        p.arguments = Array(args.dropFirst())
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(data: data, encoding: .utf8)
-    }
+    private func run(_ args: [String]) -> String? { shell(args[0], Array(args.dropFirst())) }
 
     // Strip separators so IOBluetooth's "28-2d-…" matches system_profiler's "28:2D:…".
     private static func normAddr(_ s: String) -> String {

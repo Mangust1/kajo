@@ -4,7 +4,8 @@ import Foundation
 //
 // Config (~/.config/kajo/severa.json, off-repo):
 //   { "url": "https://api.severa.visma.com/rest-api",
-//     "clientId": "...", "clientSecret": "...", "userGuid": "..." }
+//     "clientId": "...", "clientSecret": "...", "userGuid": "...",
+//     "roundUpMinutes": 30, "timeZone": "Europe/Helsinki" }
 //
 // The API's query-param filters (?userGuids=, ?projectGuids=) are silently
 // ignored, but the path sub-resource GET /users/{guid}/workhours *is* scoped to
@@ -26,8 +27,9 @@ struct SeveraProject: Codable, Identifiable, Hashable {
     var id: String { guid }
 }
 
+// eventDate is a calendar day in the timesheet's timezone (see hoursTZ), not the Mac's.
 private let severaDateFmt: DateFormatter = {
-    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.locale = Locale(identifier: "en_US_POSIX"); return f
+    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = hoursTZ; return f
 }()
 
 @MainActor
@@ -35,19 +37,20 @@ final class SeveraModel: ObservableObject {
     @Published private(set) var projects: [SeveraProject] = []
     @Published private(set) var configured = false
     @Published private(set) var status = ""
+    @Published private(set) var lastError: String?     // why the last sync failed (HTTP code + body), for the UI
     @Published private(set) var roundUpMinutes = 30   // upload rounds each bucket up to this; 0 = off
 
     private var base = "", clientId = "", clientSecret = "", userGuid = ""
     private var token: String?
     private var tokenExpiry = Date.distantPast
+    private var lastLoad = Date.distantPast
     private let cacheKey = "severa.projects.v1"
 
     init() { loadConfig(); loadCache() }
 
     private func loadConfig() {
-        let path = kajoConfigDir + "/severa.json"
-        guard let data = FileManager.default.contents(atPath: path),
-              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        let j = loadConfigJSON("severa.json")
+        guard !j.isEmpty else {
             configured = false; status = "No severa.json — add it to enable the project picker"; return
         }
         var u = (j["url"] as? String ?? "https://api.severa.visma.com/rest-api").trimmingCharacters(in: .whitespaces)
@@ -71,8 +74,11 @@ final class SeveraModel: ObservableObject {
     }
 
     /// Refresh in the background; the cached list stays on screen meanwhile.
-    func refresh() {
-        guard configured else { return }
+    /// Throttled: the tab calls this on every appearance, and the picker's contents
+    /// (which phases I've logged to lately) don't change by the minute.
+    func refresh(force: Bool = false) {
+        guard configured, force || Date().timeIntervalSince(lastLoad) > 600 else { return }
+        lastLoad = Date()
         Task { await load() }
     }
 
@@ -98,59 +104,79 @@ final class SeveraModel: ObservableObject {
         return tok
     }
 
-    private func load() async {
+    private func session(timeout: TimeInterval) -> URLSession {
         let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 12
-        let session = URLSession(configuration: cfg)
+        cfg.timeoutIntervalForRequest = timeout
+        return URLSession(configuration: cfg)
+    }
+
+    /// Send with a bearer token; on 401 drop the cached token and retry once (a revoked
+    /// or re-scoped token used to fail every call for the rest of its 55-min cache).
+    private func send(_ req: URLRequest, _ session: URLSession) async throws -> (Data, HTTPURLResponse) {
+        var r = req
+        r.setValue("Bearer \(try await token(session))", forHTTPHeaderField: "Authorization")
+        var (data, resp) = try await session.data(for: r)
+        if (resp as? HTTPURLResponse)?.statusCode == 401 {
+            token = nil
+            r.setValue("Bearer \(try await token(session))", forHTTPHeaderField: "Authorization")
+            (data, resp) = try await session.data(for: r)
+        }
+        return (data, resp as? HTTPURLResponse ?? HTTPURLResponse())
+    }
+
+    // "HTTP 403: {…first 120 bytes…}" — enough to tell bad credentials from a missing scope.
+    private static func describe(_ resp: HTTPURLResponse, _ data: Data) -> String {
+        let body = String(data: data.prefix(120), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return "HTTP \(resp.statusCode)" + (body.isEmpty ? "" : ": \(body)")
+    }
+
+    private func load() async {
+        let session = session(timeout: 12)
         do {
-            let tok = try await token(session)
             let end = Date()
-            let start = Calendar.current.date(byAdding: .day, value: -180, to: end) ?? end
+            let start = hoursCal.date(byAdding: .day, value: -180, to: end) ?? end
             var comps = URLComponents(string: "\(base)/v1.0/users/\(userGuid)/workhours")!
             comps.queryItems = [
                 .init(name: "startDate", value: severaDateFmt.string(from: start)),
                 .init(name: "endDate", value: severaDateFmt.string(from: end)),
                 .init(name: "rowCount", value: "1000"),
             ]
-            var req = URLRequest(url: comps.url!)
-            req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
-            let (data, resp) = try await session.data(for: req)
-            guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+            let (data, resp) = try await send(URLRequest(url: comps.url!), session)
+            guard resp.statusCode == 200 else { status = "Severa: \(Self.describe(resp, data))"; return }
             let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? []
             projects = Self.build(from: rows)
             status = projects.isEmpty ? "No projects logged in the last 180 days" : ""
             saveCache(projects)
         } catch {
-            status = "Severa unreachable"   // keep the cached list on screen
+            status = "Severa unreachable — \(error.localizedDescription)"   // keep the cached list on screen
+            lastLoad = .distantPast                                          // let the next appearance retry
         }
     }
 
     /// Sync one aggregated work-hour: PATCH the existing Severa row if we've posted
-    /// this bucket before, else POST a new one. Returns its workhour guid, or nil.
+    /// this bucket before, else POST a new one. Never deletes — Kajo only touches rows
+    /// it created, and only to bring them up to date. Returns the workhour guid ("" if
+    /// Severa returned none), nil on failure — with `lastError` saying why.
     func sync(_ p: WorkHourPost) async -> String? {
         guard configured else { return nil }
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 15
-        let session = URLSession(configuration: cfg)
+        lastError = nil
+        let session = session(timeout: 15)
         do {
-            let tok = try await token(session)   // scope includes hours:write
             if let guid = p.existingGuid {
                 // RFC-6902 JSON Patch — update just the fields that can change.
                 var req = URLRequest(url: URL(string: "\(base)/v1.0/workhours/\(guid)")!)
                 req.httpMethod = "PATCH"
-                req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
                 req.setValue("application/json-patch+json", forHTTPHeaderField: "Content-Type")
                 req.httpBody = try JSONSerialization.data(withJSONObject: [
                     ["op": "replace", "path": "/quantity", "value": p.hours],
                     ["op": "replace", "path": "/description", "value": p.description],
                 ])
-                let (_, resp) = try await session.data(for: req)
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                return (200...204).contains(code) ? guid : nil
+                let (data, resp) = try await send(req, session)
+                guard (200...204).contains(resp.statusCode) else { lastError = Self.describe(resp, data); return nil }
+                return guid
             } else {
                 var req = URLRequest(url: URL(string: "\(base)/v1.0/workhours")!)
                 req.httpMethod = "POST"
-                req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 req.httpBody = try JSONSerialization.data(withJSONObject: [
                     "eventDate": severaDateFmt.string(from: p.eventDate),
@@ -160,20 +186,23 @@ final class SeveraModel: ObservableObject {
                     "user": ["guid": userGuid],
                     "workType": ["guid": p.workTypeGuid],
                 ])
-                let (data, resp) = try await session.data(for: req)
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                guard (200...201).contains(code) else { return nil }
+                let (data, resp) = try await send(req, session)
+                guard (200...201).contains(resp.statusCode) else { lastError = Self.describe(resp, data); return nil }
                 let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                return (j?["guid"] as? String) ?? "posted"
+                // guid from the body, else the Location header; "" = created but unknown id
+                // (recorded so it's never re-POSTed, but it can't be PATCHed later either).
+                return (j?["guid"] as? String)
+                    ?? (resp.value(forHTTPHeaderField: "Location") as NSString?)?.lastPathComponent
+                    ?? ""
             }
-        } catch { return nil }
+        } catch { lastError = error.localizedDescription; return nil }
     }
 
     // Generic words that don't identify a customer/project — dropped before matching.
     private static let stopwords: Set<String> = [
         "the", "and", "of", "for", "consultancy", "development", "internal", "work",
         "package", "unit", "support", "updates", "fixes", "bug", "bugs", "service",
-        "center", "project", "and", "sivuston", "jatkokehitys",
+        "center", "project", "sivuston", "jatkokehitys",
     ]
     static func keywords(_ name: String) -> [String] {
         name.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
@@ -223,7 +252,8 @@ final class SeveraModel: ObservableObject {
 
 #if DEBUG
 // ponytail: one runnable check — the usage→project grouping is the only real logic.
-func _severaBuildSelfCheck() {
+// Runs from main.swift's top level (main actor) in -DDEBUG builds: `make check` / `make dev`.
+@MainActor func _severaBuildSelfCheck() {
     let rows: [[String: Any]] = [
         ["project": ["guid": "P1", "name": "Project Beta"], "phase": ["guid": "H1", "name": "Phase One"]],
         ["project": ["guid": "P1", "name": "Project Beta"], "phase": ["guid": "H1", "name": "Phase One"]],

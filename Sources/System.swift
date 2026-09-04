@@ -21,7 +21,6 @@ final class SystemModel: ObservableObject {
     private var caffeinate: Process?
     private var endDate: Date?
     private var ticker: Timer?
-    private var autoOff: DispatchWorkItem?
 
     // Duration presets shown as chips. nil label handled separately (indefinite = the toggle).
     static let presets: [(label: String, minutes: Int)] =
@@ -47,11 +46,11 @@ final class SystemModel: ObservableObject {
         keepAwake = true
         activeMinutes = minutes
         if let minutes {
+            // The 1 s tick both updates the countdown and ends the session when endDate passes.
             endDate = Date().addingTimeInterval(Double(minutes) * 60)
-            let work = DispatchWorkItem { [weak self] in self?.stop() }
-            autoOff = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double(minutes) * 60, execute: work)
-            ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+            let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+            RunLoop.main.add(t, forMode: .common)
+            ticker = t
             tick()
         } else {
             endDate = nil; remaining = nil
@@ -59,7 +58,6 @@ final class SystemModel: ObservableObject {
     }
 
     func stop() {
-        autoOff?.cancel(); autoOff = nil
         ticker?.invalidate(); ticker = nil
         caffeinate?.terminate(); caffeinate = nil
         endDate = nil; remaining = nil; activeMinutes = nil

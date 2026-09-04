@@ -31,6 +31,14 @@ enum Gruv {
     static let red    = Color(hex: 0xfb4934)
 }
 
+// "Not configured" / "unreachable" placeholder used by the Pi, Home and UniFi tabs.
+func hint(_ title: String, _ sub: String) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+        Text(title).font(.headline).foregroundStyle(Gruv.fg2)
+        Text(sub).font(.callout).foregroundStyle(Gruv.gray)
+    }.padding(.top, 8)
+}
+
 extension Color {
     init(hex: UInt32) {
         self.init(.sRGB,

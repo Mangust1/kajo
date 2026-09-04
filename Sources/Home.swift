@@ -25,7 +25,9 @@ struct HAEntity: Identifiable {
     var targetTemp: Double?   // climate setpoint (attr "temperature"), not the measured temp
 }
 
-final class HAModel: NSObject, ObservableObject, URLSessionDelegate {
+// TLS is validated normally: HA sits behind a real (Let's Encrypt) certificate, and
+// this session carries the bearer token that can unlock the front door.
+final class HAModel: ObservableObject {
     @Published var lights: [HAEntity] = []
     @Published var sensors: [HAEntity] = []
     @Published var configured = false
@@ -34,21 +36,20 @@ final class HAModel: NSObject, ObservableObject, URLSessionDelegate {
 
     private var url = "", token = ""
     private var wanted: [String] = []
-    private var session: URLSession!
+    private let session: URLSession
     private var timer: Timer?
+    private var inFlight = false
 
-    override init() {
-        super.init()
+    init() {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 6
-        session = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
+        session = URLSession(configuration: cfg)
         loadConfig()
     }
 
     private func loadConfig() {
-        let path = kajoConfigDir + "/ha.json"
-        guard let data = FileManager.default.contents(atPath: path),
-              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { configured = false; return }
+        let j = loadConfigJSON("ha.json")
+        guard !j.isEmpty else { configured = false; return }
         url = (j["url"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         token = j["token"] as? String ?? ""
         wanted = j["entities"] as? [String] ?? []
@@ -62,7 +63,16 @@ final class HAModel: NSObject, ObservableObject, URLSessionDelegate {
     }
     func stopPolling() { timer?.invalidate(); timer = nil }
 
-    func refresh() { guard configured else { return }; Task { [weak self] in await self?.load() } }
+    // One request at a time: a slow host must not stack up overlapping polls.
+    func refresh() {
+        guard configured, !inFlight else { return }
+        inFlight = true
+        Task { [weak self] in
+            guard let self else { return }
+            await self.load()
+            await MainActor.run { self.inFlight = false }
+        }
+    }
 
     func toggle(_ e: HAEntity) {
         let service: String
@@ -77,7 +87,7 @@ final class HAModel: NSObject, ObservableObject, URLSessionDelegate {
             await self.callService(domain: e.domain, service: service, entity: e.entityId)
             try? await Task.sleep(nanoseconds: 400_000_000)
             await self.load()
-            await MainActor.run { self.busy.remove(e.entityId) }
+            await MainActor.run { _ = self.busy.remove(e.entityId) }
         }
     }
 
@@ -92,14 +102,14 @@ final class HAModel: NSObject, ObservableObject, URLSessionDelegate {
             guard let s = byId[id] else { continue }
             let domain = String(id.prefix { $0 != "." })
             let attrs = s["attributes"] as? [String: Any] ?? [:]
-            var e = HAEntity(entityId: id, domain: domain,
+            let e = HAEntity(entityId: id, domain: domain,
                              name: attrs["friendly_name"] as? String ?? id,
                              state: s["state"] as? String ?? "",
                              unit: attrs["unit_of_measurement"] as? String ?? "",
                              targetTemp: attrs["temperature"] as? Double)
             if e.domain == "light" || e.domain == "switch" || e.domain == "lock" { lts.append(e) } else { sns.append(e) }
         }
-        await MainActor.run { self.lights = lts; self.sensors = sns; self.reachable = true }
+        await MainActor.run { [lts, sns] in self.lights = lts; self.sensors = sns; self.reachable = true }
     }
 
     private func getStates() async -> [[String: Any]]? {
@@ -120,13 +130,6 @@ final class HAModel: NSObject, ObservableObject, URLSessionDelegate {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["entity_id": entity])
         _ = try? await session.data(for: req)
-    }
-
-    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        if let trust = challenge.protectionSpace.serverTrust {
-            completionHandler(.useCredential, URLCredential(trust: trust))
-        } else { completionHandler(.performDefaultHandling, nil) }
     }
 }
 
@@ -303,12 +306,5 @@ struct HATab: View {
         }
         let u = e.unit.isEmpty ? "" : " \(e.unit)"
         return e.state + u
-    }
-
-    private func hint(_ title: String, _ sub: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.headline).foregroundStyle(Gruv.fg2)
-            Text(sub).font(.callout).foregroundStyle(Gruv.gray)
-        }.padding(.top, 8)
     }
 }

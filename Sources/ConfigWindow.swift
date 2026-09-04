@@ -84,7 +84,7 @@ let configFiles: [ConfigFile] = [
         ],
         template: """
         {
-          "enabledModules": ["calendar", "timer", "music", "sound", "power", "network", "unifi", "vpn", "home", "pi", "ai", "system", "currency", "memes", "clipboard"],
+          "enabledModules": [\(Tab.allCases.map { "\"\($0.rawValue)\"" }.joined(separator: ", "))],
           "menuBarIcon": true
         }
         """),
@@ -334,8 +334,9 @@ final class ConfigModel: ObservableObject {
         do {
             try FileManager.default.createDirectory(atPath: kajoConfigDir, withIntermediateDirectories: true)
             let p = path(selected)
-            try out.write(toFile: p, atomically: true, encoding: .utf8)
-            if selected.secret { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: p) }
+            // Secrets: atomic + 0600 in one step (a failed chmod used to leave the token world-readable, silently).
+            if selected.secret { try writePrivate(Data(out.utf8), to: URL(fileURLWithPath: p)) }
+            else { try out.write(toFile: p, atomically: true, encoding: .utf8) }
             text = out; value = parseJSON(out) ?? value; exists = true
             status = "Saved \(selected.name)\(selected.secret ? " (chmod 600)" : "") — relaunch to apply."
             statusOK = true
@@ -346,9 +347,11 @@ final class ConfigModel: ObservableObject {
 
     func relaunch() {
         let p = Bundle.main.bundlePath
+        let pid = ProcessInfo.processInfo.processIdentifier
         let t = Process()
         t.executableURL = URL(fileURLWithPath: "/bin/sh")
-        t.arguments = ["-c", "sleep 0.4; open \"\(p)\""]
+        // Wait for THIS process to be gone before `open`, or a slow teardown just re-activates the dying instance.
+        t.arguments = ["-c", "while kill -0 \(pid) 2>/dev/null; do sleep 0.1; done; open \"\(p)\""]
         try? t.run()
         NSApp.terminate(nil)
     }

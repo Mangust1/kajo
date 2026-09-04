@@ -83,8 +83,7 @@ final class AIModel: ObservableObject {
             let totalTokens = (j["total_prompt_tokens"] as? Int ?? 0) + (j["total_completion_tokens"] as? Int ?? 0)
             let totalReqs = j["total_requests"] as? Int ?? 0
 
-            let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd"
-            let today = df.string(from: Date())
+            let today = Self.dayFmt.string(from: Date())
             let ud = UserDefaults.standard
             var baseTokens = ud.integer(forKey: "omlx.base.tokens")
             var baseReqs = ud.integer(forKey: "omlx.base.requests")
@@ -100,7 +99,13 @@ final class AIModel: ObservableObject {
         }
     }
 
-    // Sum today's Claude Code usage from the live transcripts (throttled).
+    private static let dayFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f }()
+    private static let iso: ISO8601DateFormatter = { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f }()
+    private static let isoPlain = ISO8601DateFormatter()
+
+    // Sum today's Claude Code usage from the live transcripts (throttled). Files touched
+    // today are scanned, but each MESSAGE is counted by its own timestamp — a session that
+    // ran past midnight used to add yesterday's tokens to today.
     private func computeClaude() {
         guard Date().timeIntervalSince(lastClaude) > 25 else { return }
         lastClaude = Date()
@@ -108,6 +113,10 @@ final class AIModel: ObservableObject {
             let base = NSHomeDirectory() + "/.claude/projects"
             let fm = FileManager.default
             let cal = Calendar.current
+            func isToday(_ ts: Any?) -> Bool {
+                guard let s = ts as? String, let d = Self.iso.date(from: s) ?? Self.isoPlain.date(from: s) else { return true }
+                return cal.isDateInToday(d)
+            }
             var tokens = 0, msgs = 0
             if let projects = try? fm.contentsOfDirectory(atPath: base) {
                 for proj in projects {
@@ -122,7 +131,7 @@ final class AIModel: ObservableObject {
                             guard let d = line.data(using: .utf8),
                                   let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                                   let msg = obj["message"] as? [String: Any],
-                                  let usage = msg["usage"] as? [String: Any] else { continue }
+                                  let usage = msg["usage"] as? [String: Any], isToday(obj["timestamp"]) else { continue }
                             tokens += (usage["output_tokens"] as? Int ?? 0) + (usage["input_tokens"] as? Int ?? 0)
                             msgs += 1
                         }

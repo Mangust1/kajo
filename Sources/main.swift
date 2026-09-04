@@ -16,6 +16,10 @@ import QuartzCore            // CADisplayLink — vsync-synced panel animation
 
 // MARK: - Bootstrap
 
+#if DEBUG
+MainActor.assumeIsolated { _severaBuildSelfCheck() }   // -DDEBUG builds (make dev / make check) assert the usage→project grouping first
+#endif
+
 // Self-check / scripting: `Kajo --clean-url <url>` prints the cleaned URL and exits.
 if let i = CommandLine.arguments.firstIndex(of: "--clean-url"), i + 1 < CommandLine.arguments.count {
     print(cleanedURL(CommandLine.arguments[i + 1]) ?? CommandLine.arguments[i + 1])

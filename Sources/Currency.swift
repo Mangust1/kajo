@@ -45,6 +45,7 @@ final class CurrencyModel: ObservableObject {
     @Published var rates: [String: Double] = ["EUR": 1]   // units per 1 EUR
     @Published var eur: Double = 1                         // source of truth
     @Published var asOf: String = ""                      // rate date from API
+    @Published var error: String?                          // shown in the footer instead of silent 0.00s
     private var lastFetch = Date.distantPast
 
     func refresh(force: Bool = false) {
@@ -53,18 +54,25 @@ final class CurrencyModel: ObservableObject {
         let to = currencies.map(\.code).filter { $0 != "EUR" }.joined(separator: ",")
         guard let url = URL(string: "https://api.frankfurter.app/latest?from=EUR&to=\(to)") else { return }
         lastFetch = Date()
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            guard let data,
+        URLSession.shared.dataTask(with: url) { [weak self] data, resp, err in
+            guard let data, (resp as? HTTPURLResponse)?.statusCode == 200,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let r = obj["rates"] as? [String: Double] else { return }
+                  let r = obj["rates"] as? [String: Double] else {
+                // One unsupported code in currency.json 404s the whole request — say so.
+                let code = (resp as? HTTPURLResponse)?.statusCode
+                let why = err?.localizedDescription ?? (code.map { "HTTP \($0) — check the codes in currency.json" } ?? "bad response")
+                DispatchQueue.main.async { self?.error = "Rates unavailable: \(why)" }
+                return
+            }
             var table = r; table["EUR"] = 1
             let date = obj["date"] as? String ?? ""
-            DispatchQueue.main.async { self?.rates = table; self?.asOf = date }
+            DispatchQueue.main.async { self?.rates = table; self?.asOf = date; self?.error = nil }
         }.resume()
     }
 
     func amount(_ code: String) -> Double { eur * (rates[code] ?? 0) }
-    func set(_ code: String, _ v: Double) { eur = v / (rates[code] ?? 1) }
+    // No rate yet → ignore the edit rather than silently treating the field as EUR.
+    func set(_ code: String, _ v: Double) { if let r = rates[code], r > 0 { eur = v / r } }
 }
 
 // AppKit field: Tab + Shift-Tab both work in the borderless panel (SwiftUI
@@ -162,9 +170,10 @@ struct CurrencyTab: View {
             Spacer()
 
             HStack {
-                Text(model.asOf.isEmpty ? "" : "ECB rate · \(model.asOf)")
+                Text(model.error ?? (model.asOf.isEmpty ? "" : "ECB rate · \(model.asOf)"))
                     .font(.system(size: 11))
-                    .foregroundColor(Gruv.fg4)
+                    .foregroundColor(model.error == nil ? Gruv.fg4 : Gruv.red)
+                    .lineLimit(2)
                 Spacer()
                 Button { model.refresh(force: true) } label: {
                     Image(systemName: "arrow.clockwise")

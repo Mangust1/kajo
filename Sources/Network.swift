@@ -146,13 +146,15 @@ final class NetworkModel: ObservableObject {
     func refresh() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let on = (self.sh("/usr/sbin/networksetup", ["-getairportpower", self.dev]) ?? "").contains(": On")
+            let on = (shell("/usr/sbin/networksetup", ["-getairportpower", self.dev]) ?? "").contains(": On")
             let ssid = self.currentSSID()
-            let ip = (self.sh("/usr/sbin/ipconfig", ["getifaddr", self.dev]) ?? "")
+            let ip = (shell("/usr/sbin/ipconfig", ["getifaddr", self.dev]) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let ord = self.readOrder()
-            let active = self.primaryService()
-            let lan = self.wiredIP()
+            // One `networksetup -listnetworkserviceorder` per refresh, parsed three ways (it used to run 3×).
+            let orderOut = shell("/usr/sbin/networksetup", ["-listnetworkserviceorder"]) ?? ""
+            let ord = Self.parseOrder(orderOut)
+            let active = self.primaryService(orderOut)
+            let lan = self.wiredIP(orderOut)
             DispatchQueue.main.async {
                 self.wifiOn = on
                 self.ssid = on ? (ssid.isEmpty ? "Not connected" : ssid) : "Off"
@@ -174,8 +176,8 @@ final class NetworkModel: ObservableObject {
     // Interface actually carrying the default route right now, mapped to its
     // service name (e.g. "Wi-Fi", "Thunderbolt Ethernet Slot 1"). This is the
     // *real* primary — it can differ from the Wi-Fi first/last preference.
-    private func primaryService() -> String {
-        let out = sh("/sbin/route", ["-n", "get", "default"]) ?? ""
+    private func primaryService(_ order: String) -> String {
+        let out = shell("/sbin/route", ["-n", "get", "default"]) ?? ""
         var iface = ""
         for line in out.split(separator: "\n") {
             let t = line.trimmingCharacters(in: .whitespaces)
@@ -185,7 +187,6 @@ final class NetworkModel: ObservableObject {
             }
         }
         guard !iface.isEmpty else { return "" }
-        let order = sh("/usr/sbin/networksetup", ["-listnetworkserviceorder"]) ?? ""
         for line in order.split(separator: "\n") where line.contains("Device: \(iface))") {
             if let r = line.range(of: "Hardware Port: "),
                let c = line.range(of: ", Device:", range: r.upperBound..<line.endIndex) {
@@ -197,15 +198,14 @@ final class NetworkModel: ObservableObject {
 
     // Local IP of the first wired (non-Wi-Fi) service that has an address.
     // "" when nothing is plugged in.
-    private func wiredIP() -> String {
-        let order = sh("/usr/sbin/networksetup", ["-listnetworkserviceorder"]) ?? ""
+    private func wiredIP(_ order: String) -> String {
         for line in order.split(separator: "\n") {
             guard line.contains("Hardware Port:"), !line.contains("Wi-Fi"),
                   let r = line.range(of: "Device: "),
                   let end = line.range(of: ")", range: r.upperBound..<line.endIndex) else { continue }
             let iface = String(line[r.upperBound..<end.lowerBound])
             if iface.isEmpty || iface == dev { continue }
-            let ip = (sh("/usr/sbin/ipconfig", ["getifaddr", iface]) ?? "")
+            let ip = (shell("/usr/sbin/ipconfig", ["getifaddr", iface]) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !ip.isEmpty { return ip }
         }
@@ -236,7 +236,7 @@ final class NetworkModel: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             func run(_ args: [String]) -> [String: Any]? {
-                let out = self.sh("/usr/bin/networkQuality", ["-c"] + args) ?? ""
+                let out = shell("/usr/bin/networkQuality", ["-c"] + args) ?? ""
                 return out.data(using: .utf8).flatMap {
                     try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
                 }
@@ -277,13 +277,16 @@ final class NetworkModel: ObservableObject {
         }
         p.terminationHandler = { [weak self] _ in
             h.readabilityHandler = nil
+            if !buf.isEmpty { self?.handleOoklaLine(buf); buf.removeAll() }   // the result line may lack a trailing \n
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.speedPhase = ""; self.speedtesting = false
                 self.speedNet = self.netFingerprint; self.saveCache()
             }
         }
-        do { try p.run() } catch { runBuiltin() }
+        do { try p.run() } catch { runBuiltin(); return }
+        // A hung CLI used to leave the button disabled until relaunch.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 90) { if p.isRunning { p.terminate() } }
     }
 
     private func handleOoklaLine(_ data: Data) {
@@ -313,7 +316,7 @@ final class NetworkModel: ObservableObject {
         wifiOn.toggle()
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            _ = self.sh("/usr/sbin/networksetup", ["-setairportpower", self.dev, target])
+            _ = shell("/usr/sbin/networksetup", ["-setairportpower", self.dev, target])
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self.refresh() }
         }
     }
@@ -326,7 +329,7 @@ final class NetworkModel: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             // Passwordless via a scoped /etc/sudoers.d rule — no prompt.
-            _ = self.sh("/usr/bin/sudo", ["-n", "/usr/sbin/networksetup", "-ordernetworkservices"] + names)
+            _ = shell("/usr/bin/sudo", ["-n", "/usr/sbin/networksetup", "-ordernetworkservices"] + names)
             DispatchQueue.main.async { self.working = false; self.refresh() }
         }
     }
@@ -334,7 +337,7 @@ final class NetworkModel: ObservableObject {
     private func currentSSID() -> String {
         // Prefer CoreWLAN (same source the scan uses, so SSIDs match exactly).
         if let s = CWWiFiClient.shared().interface()?.ssid(), !s.isEmpty { return s }
-        let out = sh("/usr/sbin/ipconfig", ["getsummary", dev]) ?? ""
+        let out = shell("/usr/sbin/ipconfig", ["getsummary", dev]) ?? ""
         for sub in out.split(separator: "\n") {
             let t = sub.trimmingCharacters(in: .whitespaces)
             guard t.hasPrefix("SSID ") || t.hasPrefix("SSID:") else { continue }
@@ -345,8 +348,7 @@ final class NetworkModel: ObservableObject {
         return ""
     }
 
-    private func readOrder() -> [String] {
-        let out = sh("/usr/sbin/networksetup", ["-listnetworkserviceorder"]) ?? ""
+    private static func parseOrder(_ out: String) -> [String] {
         var result: [String] = []
         for sub in out.split(separator: "\n") {
             let s = String(sub)
@@ -357,15 +359,6 @@ final class NetworkModel: ObservableObject {
         return result
     }
 
-    private func sh(_ path: String, _ args: [String]) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = args
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        let d = pipe.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
-        return String(data: d, encoding: .utf8)
-    }
 }
 
 struct NetworkTab: View {

@@ -2,5 +2,7 @@
   "url": "https://api.severa.visma.com/rest-api",
   "clientId": "YOUR_CLIENT_ID",
   "clientSecret": "YOUR_CLIENT_SECRET",
-  "userGuid": "YOUR_USER_GUID"
+  "userGuid": "YOUR_USER_GUID",
+  "roundUpMinutes": 30,
+  "timeZone": "Europe/Helsinki"
 }

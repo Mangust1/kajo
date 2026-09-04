@@ -111,3 +111,33 @@ enum AppLauncher {
         NotificationCenter.default.post(name: .kajoDismiss, object: nil)
     }
 }
+
+// MARK: - Shared plumbing (one copy — every tab used to carry its own)
+
+/// Run a CLI and return its stdout, nil if it couldn't launch. Drains the pipe
+/// BEFORE waiting for exit: waiting first deadlocks once output exceeds the 64 KB
+/// pipe buffer (e.g. `tailscale status --json` on a big tailnet).
+func shell(_ path: String, _ args: [String]) -> String? {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: path)
+    p.arguments = args
+    let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
+    do { try p.run() } catch { return nil }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return String(data: data, encoding: .utf8)
+}
+
+/// `~/.config/kajo/<name>` parsed as a JSON object; [:] when missing or invalid.
+func loadConfigJSON(_ name: String) -> [String: Any] {
+    guard let d = try? Data(contentsOf: URL(fileURLWithPath: kajoConfigDir + "/" + name)),
+          let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+    return j
+}
+
+/// Write atomically (a crash mid-write can't truncate the file) and owner-only.
+/// Used for anything holding customer names, clipboard text or credentials.
+func writePrivate(_ data: Data, to url: URL) throws {
+    try data.write(to: url, options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+}

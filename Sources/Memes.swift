@@ -55,9 +55,8 @@ final class MemeLibrary: ObservableObject {
             list = arr.filter { FileManager.default.fileExists(atPath: filesDir.appendingPathComponent($0.file).path) }
         }
         let known = Set(list.map { $0.file })
-        let exts: Set<String> = ["gif", "png", "jpg", "jpeg", "webp", "heic"]
         if let files = try? FileManager.default.contentsOfDirectory(atPath: filesDir.path) {
-            for f in files where !f.hasPrefix(".") && !known.contains(f) && exts.contains((f as NSString).pathExtension.lowercased()) {
+            for f in files where !f.hasPrefix(".") && !known.contains(f) && Self.imgExts.contains((f as NSString).pathExtension.lowercased()) {
                 list.append(Meme(file: f, tags: [memeUntagged], added: Date()))
             }
         }
@@ -71,7 +70,9 @@ final class MemeLibrary: ObservableObject {
     }
 
     func add(data: Data, ext: String, tags: [String] = []) {
-        let name = "\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString.prefix(6)).\(ext.isEmpty ? "png" : ext)"
+        let ext = ext.isEmpty ? "png" : ext.lowercased()
+        guard Self.imgExts.contains(ext) else { return }   // a dropped .pdf/.txt used to be stored (and indexed) forever
+        let name = "\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString.prefix(6)).\(ext)"
         try? data.write(to: filesDir.appendingPathComponent(name))
         memes.insert(Meme(file: name, tags: tags.isEmpty ? [memeUntagged] : tags, added: Date()), at: 0)
         persist()
@@ -143,22 +144,43 @@ func memeFuzzy(_ query: String, _ text: String) -> Int? {
     return qi == q.count ? score : nil
 }
 
+// Animated (GIFs keep playing in the grid); decoded once, off the main thread, and
+// kept in an NSCache — LazyVGrid recreates cells on every scroll-in, which used to
+// re-read and re-decode every visible GIF on the main thread each time.
+final class ThumbImageView: NSImageView { var url: URL? }
+
 struct MemeThumb: NSViewRepresentable {
     let url: URL
-    func makeNSView(context: Context) -> NSImageView {
-        let v = NSImageView()
+    private static let cache: NSCache<NSURL, NSImage> = { let c = NSCache<NSURL, NSImage>(); c.countLimit = 150; return c }()
+
+    func makeNSView(context: Context) -> ThumbImageView {
+        let v = ThumbImageView()
         v.imageScaling = .scaleProportionallyUpOrDown      // fit within the cell, keep aspect ratio
         v.imageAlignment = .alignCenter
         v.animates = true
-        v.image = NSImage(contentsOf: url)
         // Don't let the image's natural size dictate layout — let the SwiftUI frame shrink it.
         v.setContentHuggingPriority(.defaultLow, for: .horizontal)
         v.setContentHuggingPriority(.defaultLow, for: .vertical)
         v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         v.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        load(into: v)
         return v
     }
-    func updateNSView(_ v: NSImageView, context: Context) { v.animates = true }
+    func updateNSView(_ v: ThumbImageView, context: Context) { v.animates = true; if v.url != url { load(into: v) } }
+
+    private func load(into v: ThumbImageView) {
+        v.url = url
+        if let img = Self.cache.object(forKey: url as NSURL) { v.image = img; return }
+        v.image = nil
+        let u = url
+        DispatchQueue.global(qos: .userInitiated).async {
+            let img = NSImage(contentsOf: u)
+            DispatchQueue.main.async {
+                if let img { Self.cache.setObject(img, forKey: u as NSURL) }
+                if v.url == u { v.image = img }              // the cell may have been recycled for another meme
+            }
+        }
+    }
 }
 
 // AppKit text field that reliably grabs first-responder in Kajo's borderless,
@@ -207,17 +229,18 @@ struct MemesTab: View {
     private let cols = [GridItem(.adaptive(minimum: 96), spacing: 8)]
 
     var body: some View {
+        let filtered = model.filtered          // fuzzy-score once per render, not three times
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(Gruv.fg4)
                 FocusedTextField(text: $model.search, placeholder: "Search…  (try “tagthis”)",
                                  onSubmit: { if let f = model.filtered.first { pick(f) } })
-                Text("\(model.filtered.count)").font(.caption2).foregroundStyle(Gruv.gray)
+                Text("\(filtered.count)").font(.caption2).foregroundStyle(Gruv.gray)
             }
             .padding(8)
             .background(RoundedRectangle(cornerRadius: 8).fill(Gruv.bg1.opacity(0.6)))
 
-            if model.filtered.isEmpty {
+            if filtered.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "photo.on.rectangle.angled").font(.title2).foregroundStyle(Gruv.fg4)
                     Text(model.memes.isEmpty ? "Paste (⌘V) or drag a meme in" : "No match")
@@ -226,7 +249,7 @@ struct MemesTab: View {
             } else {
                 ScrollView {
                     LazyVGrid(columns: cols, spacing: 8) {
-                        ForEach(model.filtered) { cell($0) }
+                        ForEach(filtered) { cell($0) }
                     }.padding(.vertical, 4)
                 }
             }

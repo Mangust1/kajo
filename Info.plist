@@ -15,7 +15,7 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1</string>
+    <string>0.26</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
@@ -32,6 +32,8 @@
     <string>Kajo shows your upcoming events in the Calendar tab.</string>
     <key>NSCalendarsUsageDescription</key>
     <string>Kajo shows your upcoming events in the Calendar tab.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Kajo talks to your home server, Home Assistant and UniFi controller on the local network.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key>

@@ -31,11 +31,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelega
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        // Only ask for what the enabled tabs need — a fresh install shouldn't get three prompts.
         // Instantiating a central manager triggers the Bluetooth permission
         // prompt, so blueutil (spawned by us) is allowed to enumerate devices.
-        btManager = CBCentralManager(delegate: self, queue: nil)
-        // Location authorization is required by macOS to scan for Wi-Fi networks.
-        locationManager.requestWhenInUseAuthorization()
+        if enabledModules.contains(.sound) { btManager = CBCentralManager(delegate: self, queue: nil) }
+        // Location authorization is required by macOS to scan for Wi-Fi networks (and for weather).
+        if enabledModules.contains(.network) || enabledModules.contains(.calendar) {
+            locationManager.requestWhenInUseAuthorization()
+        }
         setupMenuBar()
     }
 
@@ -87,10 +90,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelega
             NotificationCenter.default.post(name: .kajoDismiss, object: nil)
             return
         }
+        if url.host == "config" {   // kajo://config — the Settings window
+            NotificationCenter.default.post(name: .kajoDismiss, object: nil)
+            ConfigWindowController.shared.show()
+            return
+        }
         // Accept both  kajo://tab/calendar  and  kajo://calendar
         let raw = (url.host == "tab" ? url.pathComponents.last : url.host) ?? ""
         let name = raw.lowercased()
-        try? "\(name)\n".append(toFile: "/tmp/kajo.log")
         // Quake terminal ON HOLD — Hammerspoon (Ctrl+') handles it for now. QuakeController
         // is kept dormant; re-enable by uncommenting the two lines below.
         // if name == "quake" { QuakeController.shared.toggle(); return }

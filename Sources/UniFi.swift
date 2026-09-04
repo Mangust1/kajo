@@ -47,6 +47,7 @@ final class UniFiModel: NSObject, ObservableObject, URLSessionDelegate {
     private var session: URLSession!
     private var host = "", username = "", password = "", site = "default"
     private var timer: Timer?
+    private var inFlight = false
 
     override init() {
         super.init()
@@ -62,11 +63,8 @@ final class UniFiModel: NSObject, ObservableObject, URLSessionDelegate {
     }
 
     private func loadConfig() {
-        let path = kajoConfigDir + "/unifi.json"
-        guard let data = FileManager.default.contents(atPath: path),
-              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            configured = false; return
-        }
+        let j = loadConfigJSON("unifi.json")
+        guard !j.isEmpty else { configured = false; return }
         host = (j["host"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         username = j["username"] as? String ?? ""
         password = j["password"] as? String ?? ""
@@ -84,15 +82,19 @@ final class UniFiModel: NSObject, ObservableObject, URLSessionDelegate {
     func stopPolling() { timer?.invalidate(); timer = nil }
 
     func refresh() {
-        guard configured else { return }
-        loading = true
+        guard configured, !inFlight else { return }   // 5 s timer vs 6 s timeout: never stack polls
+        loading = true; inFlight = true
         Task { [weak self] in
             guard let self else { return }
-            // Reuse the session cookie; only (re)login if the request fails.
-            var health = await self.getJSON("/proxy/network/api/s/\(self.site)/stat/health")
-            if health == nil, await self.login() {
-                health = await self.getJSON("/proxy/network/api/s/\(self.site)/stat/health")
+            defer { Task { @MainActor in self.inFlight = false } }
+            // Reuse the session cookie; re-login ONLY on 401 — a timeout or 5xx must not
+            // re-send the admin credentials (every 5 s) to whatever answered.
+            var (health, code) = await self.getJSON("/proxy/network/api/s/\(self.site)/stat/health")
+            if code == 401, await self.login() {
+                (health, code) = await self.getJSON("/proxy/network/api/s/\(self.site)/stat/health")
             }
+            // UniFi emits some counters as floats (1234.5) — `as? Int` on those yields nil.
+            func int(_ v: Any?, _ dflt: Int) -> Int { (v as? NSNumber)?.intValue ?? dflt }
             var s = UniFiStatus()
             if let health, let arr = health["data"] as? [[String: Any]] {
                 s.reachable = true
@@ -103,23 +105,23 @@ final class UniFiModel: NSObject, ObservableObject, URLSessionDelegate {
                         s.wanIP = sub["wan_ip"] as? String ?? ""
                         s.gateway = sub["gw_name"] as? String ?? ""
                         s.isp = sub["isp_name"] as? String ?? ""
-                        s.rxRate = sub["rx_bytes-r"] as? Int ?? 0
-                        s.txRate = sub["tx_bytes-r"] as? Int ?? 0
+                        s.rxRate = int(sub["rx_bytes-r"], 0)
+                        s.txRate = int(sub["tx_bytes-r"], 0)
                         if let us = sub["uptime_stats"] as? [String: Any] {
                             s.links = us.compactMap { name, v in
                                 guard let d = v as? [String: Any] else { return nil }
                                 return WANLink(name: name,
-                                               availability: d["availability"] as? Double ?? 0,
-                                               latency: d["latency_average"] as? Int ?? -1,
+                                               availability: (d["availability"] as? NSNumber)?.doubleValue ?? 0,
+                                               latency: int(d["latency_average"], -1),
                                                active: false)
                             }.sorted { $0.name < $1.name }
                         }
                     case "www":
-                        s.latencyMs = sub["latency"] as? Int ?? -1
-                        s.uptimeSec = sub["uptime"] as? Int ?? 0
+                        s.latencyMs = int(sub["latency"], -1)
+                        s.uptimeSec = int(sub["uptime"], 0)
                     case "wlan":
-                        s.clients = sub["num_user"] as? Int ?? s.clients
-                        s.guests = sub["num_guest"] as? Int ?? s.guests
+                        s.clients = int(sub["num_user"], s.clients)
+                        s.guests = int(sub["num_guest"], s.guests)
                     default: break
                     }
                 }
@@ -130,7 +132,7 @@ final class UniFiModel: NSObject, ObservableObject, URLSessionDelegate {
                     s.links[i].active = true
                 }
             }
-            await MainActor.run {
+            await MainActor.run { [s] in
                 self.loading = false
                 self.everLoaded = true
                 if s.reachable {                       // only update on success; keep cache on failure
@@ -154,18 +156,21 @@ final class UniFiModel: NSObject, ObservableObject, URLSessionDelegate {
         return true
     }
 
-    private func getJSON(_ path: String) async -> [String: Any]? {
-        guard let url = URL(string: host + path),
-              let (data, resp) = try? await session.data(from: url),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
-              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        return j
+    // JSON body (nil unless 200) + the HTTP status (0 = no response) so callers can tell
+    // "cookie expired" from "controller down".
+    private func getJSON(_ path: String) async -> ([String: Any]?, Int) {
+        guard let url = URL(string: host + path), let (data, resp) = try? await session.data(from: url) else { return (nil, 0) }
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard code == 200, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return (nil, code) }
+        return (j, code)
     }
 
-    // Accept the controller's self-signed cert (LAN home gateway).
+    // Accept the controller's self-signed cert — but only for the configured host, so
+    // this session can't be talked into trusting anything else.
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        if let trust = challenge.protectionSpace.serverTrust {
+        if let trust = challenge.protectionSpace.serverTrust,
+           challenge.protectionSpace.host == URL(string: host)?.host {
             completionHandler(.useCredential, URLCredential(trust: trust))
         } else {
             completionHandler(.performDefaultHandling, nil)
@@ -272,14 +277,6 @@ struct UniFiTab: View {
         .font(.callout)
         .padding(.vertical, 9)
         .overlay(Rectangle().fill(Gruv.bg3.opacity(0.3)).frame(height: 1), alignment: .bottom)
-    }
-
-    private func hint(_ title: String, _ sub: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.headline).foregroundStyle(Gruv.fg2)
-            Text(sub).font(.callout).foregroundStyle(Gruv.gray)
-        }
-        .padding(.top, 8)
     }
 
     private func ok(_ status: String) -> Color { status == "ok" ? Gruv.green : (status.isEmpty ? Gruv.fg4 : Gruv.red) }

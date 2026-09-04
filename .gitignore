@@ -5,3 +5,6 @@
 # build artifacts
 Kajo.app/
 Kajo Dev.app/
+
+# self-check build
+.check/

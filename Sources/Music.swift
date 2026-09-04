@@ -48,12 +48,16 @@ final class NowPlayingModel: ObservableObject {
 
     func stopPolling() { timer?.invalidate(); timer = nil }
 
+    private var inFlight = false
+
     func refresh() {
+        guard !inFlight else { return }   // Spotify not answering AppleEvents must not stack osascripts every 1.5 s
+        inFlight = true
         let script = infoScript
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let out = NowPlayingModel.runOSA(script) ?? ""
             let lines = out.components(separatedBy: "\n")
-            DispatchQueue.main.async { self?.apply(lines) }
+            DispatchQueue.main.async { self?.inFlight = false; self?.apply(lines) }
         }
     }
 
@@ -93,14 +97,7 @@ final class NowPlayingModel: ObservableObject {
     }
 
     private static func runOSA(_ script: String) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", script]
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        shell("/usr/bin/osascript", ["-e", script])?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

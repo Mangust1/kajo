@@ -41,16 +41,22 @@ final class TimerModel: ObservableObject {
 
     func startOrPause() { running ? pause() : start() }
 
+    // Wall-clock based: `remaining` is derived from endDate each tick, so a stalled
+    // run loop (menus, drags) or a lid-closed sleep can't make the timer run late.
+    private var endDate = Date()
+
     func start() {
         guard !running else { return }
         if remaining <= 0 { remaining = totalSeconds }
+        endDate = Date().addingTimeInterval(Double(remaining))
         running = true
-        ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
+        let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(t, forMode: .common)   // keep ticking while a menu is open
+        ticker = t
     }
 
     func pause() {
+        if running { remaining = max(0, Int(endDate.timeIntervalSinceNow.rounded(.up))) }
         running = false
         ticker?.invalidate(); ticker = nil
     }
@@ -58,8 +64,9 @@ final class TimerModel: ObservableObject {
     func reset() { pause(); remaining = totalSeconds }
 
     private func tick() {
-        guard remaining > 1 else { finish(); return }
-        remaining -= 1
+        let left = Int(endDate.timeIntervalSinceNow.rounded(.up))
+        if left <= 0 { finish(); return }
+        if left != remaining { remaining = left }
     }
 
     private func finish() {

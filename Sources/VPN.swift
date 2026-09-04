@@ -45,17 +45,23 @@ final class VPNModel: ObservableObject {
     }
     func stopPolling() { timer?.invalidate(); timer = nil }
 
+    private var inFlight = false
+
     func refresh() {
+        guard !inFlight else { return }   // a hung tailscaled must not pile up a worker per tick
+        inFlight = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            // Up/down is authoritative via BackendState. `tailscale ip -4` reports
-            // the node's assigned IP even when STOPPED, so it can't gauge up/down.
-            var tsUp = false
+            defer { DispatchQueue.main.async { self.inFlight = false } }
+            // Up/down is authoritative via BackendState. The node's IPs ride along in
+            // Self.TailscaleIPs (they're reported even when STOPPED, so gate on tsUp).
+            var tsUp = false, tsip = ""
             if let d = Self.runTS(["status", "--json"]).data(using: .utf8),
                let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
                 tsUp = (o["BackendState"] as? String) == "Running"
+                let ips = (o["Self"] as? [String: Any])?["TailscaleIPs"] as? [String] ?? []
+                tsip = tsUp ? (ips.first { !$0.contains(":") } ?? "") : ""
             }
-            let tsip = tsUp ? (Self.runTS(["ip", "-4"]).split(separator: "\n").first.map(String.init) ?? "") : ""
             var tg = false, ov = false, nd = false, tgip = "", ovip = "", ndip = ""
             for ip in self.utunIPv4s() {
                 if ip == tsip { continue }                                          // Tailscale's own utun — handled above
@@ -107,14 +113,7 @@ final class VPNModel: ObservableObject {
 
     // Run the tailscale CLI, return trimmed stdout ("" on failure).
     private static func runTS(_ args: [String]) -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: tsBin)
-        p.arguments = args
-        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
-        do { try p.run() } catch { return "" }
-        p.waitUntilExit()
-        let d = out.fileHandleForReading.readDataToEndOfFile()
-        return String(data: d, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        shell(tsBin, args)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     func toggleTailscale() {
