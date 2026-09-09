@@ -125,13 +125,16 @@ final class KajoTerminalView: LocalProcessTerminalView {
             default: if isBackspace { send([0x17]); return true }               // Ctrl+W
             }
         }
-        if flags == [.command] {
-            switch chars {
+        // Zoom: match the typed character so shifted layouts work (Nordic "=" is ⇧0, "+" is unshifted).
+        if flags.subtracting(.shift) == [.command] {
+            switch event.characters ?? "" {
             case "+", "=": zoom(+1); return true
-            case "-":      zoom(-1); return true
-            case "0":      zoom(nil); return true
+            case "-", "_": zoom(-1); return true
+            case "0" where flags == [.command]: zoom(nil); return true
             default: break
             }
+        }
+        if flags == [.command] {
             switch key {
             case NSLeftArrowFunctionKey:  send([0x1b, 0x5b, 0x48]); return true   // Home (ESC [ H)
             case NSRightArrowFunctionKey: send([0x1b, 0x5b, 0x46]); return true   // End  (ESC [ F)
@@ -315,6 +318,7 @@ final class TerminalWindowController: NSObject, LocalProcessTerminalViewDelegate
         tlog("hide: key=\(w.isKeyWindow) onActiveSpace=\(w.isOnActiveSpace) appActive=\(NSApp.isActive)")
         isShown = false
         w.ignoresMouseEvents = true
+        w.level = .floating             // stay above the app we hand focus to while sliding out
         let up = w.frame.offsetBy(dx: 0, dy: w.frame.height + 20)
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.14
@@ -322,6 +326,7 @@ final class TerminalWindowController: NSObject, LocalProcessTerminalViewDelegate
             w.animator().setFrame(up, display: true)
         }, completionHandler: {
             w.alphaValue = 0            // stays ordered-in → keeps its Space
+            w.level = .normal
         })
         if NSApp.isActive { previousApp?.activate() }   // hand focus back, like the panel does
     }
