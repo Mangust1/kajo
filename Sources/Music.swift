@@ -47,7 +47,7 @@ final class NowPlayingModel: ObservableObject {
         let newArtist = info["Artist"] as? String ?? ""
         if name != title || newArtist != artist {
             artwork = nil; artURL = nil
-            fetchArtworkFallback(track: name, artist: newArtist)   // Spotify's URL only comes via AppleScript
+            fetchArtworkFallback(track: name, artist: newArtist, album: info["Album"] as? String ?? "")   // Spotify's URL only comes via AppleScript
         }
         title = name
         artist = newArtist
@@ -110,22 +110,48 @@ final class NowPlayingModel: ObservableObject {
 
     /// Cover art without Automation rights: Apple's public iTunes Search API (no key). Upscales the
     /// 100px thumbnail URL to 600px. Ignored if Spotify's own artwork arrives via AppleScript first.
-    private func fetchArtworkFallback(track: String, artist: String) {
-        var comps = URLComponents(string: "https://itunes.apple.com/search")!
-        comps.queryItems = [.init(name: "term", value: "\(artist) \(track)"), .init(name: "entity", value: "song"), .init(name: "limit", value: "1")]
-        guard let url = comps.url else { return }
+    private func fetchArtworkFallback(track: String, artist: String, album: String) {
         let wantTitle = track
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            guard let data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let first = (json["results"] as? [[String: Any]])?.first,
-                  let art = first["artworkUrl100"] as? String else { return }
+        weak var weakSelf = self
+        let a = artist.lowercased(), al = album.lowercased()
+        func norm(_ v: Any?) -> String { ((v as? String) ?? "").lowercased() }
+        func results(_ url: URL, _ done: @escaping ([[String: Any]]) -> Void) {
+            URLSession.shared.dataTask(with: url) { data, _, _ in
+                let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                done(json?["results"] as? [[String: Any]] ?? [])
+            }.resume()
+        }
+        func search(_ items: [String: String]) -> URL {
+            var c = URLComponents(string: "https://itunes.apple.com/search")!
+            c.queryItems = items.map { .init(name: $0.key, value: $0.value) } + [.init(name: "limit", value: "25")]
+            return c.url!
+        }
+        func use(_ art: String?) {
+            guard let art else { return }
             let big = art.replacingOccurrences(of: "100x100bb", with: "600x600bb")
             DispatchQueue.main.async {
-                guard let self, self.title == wantTitle, self.artwork == nil else { return }   // still the same track, nothing better arrived
-                self.loadArtwork(big)
+                guard let me = weakSelf, me.title == wantTitle, me.artwork == nil else { return }   // still the same track, nothing better arrived
+                me.loadArtwork(big)
             }
-        }.resume()
+        }
+        // 1) song search — the first hit is often a lullaby/8-bit cover, so insist on the same artist,
+        //    prefer the same album, never show another artist's art.
+        results(search(["term": "\(artist) \(track)", "entity": "song"])) { r in
+            let same = r.filter { norm($0["artistName"]) == a }
+            if let hit = same.first(where: { !al.isEmpty && norm($0["collectionName"]).hasPrefix(al) }) ?? same.first {
+                use(hit["artworkUrl100"] as? String); return
+            }
+            // 2) some catalogues (TOOL…) never surface in song search: artist id → albums → album name.
+            guard !al.isEmpty else { return }
+            results(search(["term": artist, "entity": "musicArtist"])) { r in
+                guard let id = r.first(where: { norm($0["artistName"]) == a })?["artistId"] as? Int else { return }
+                var c = URLComponents(string: "https://itunes.apple.com/lookup")!
+                c.queryItems = [.init(name: "id", value: String(id)), .init(name: "entity", value: "album"), .init(name: "limit", value: "200")]
+                results(c.url!) { r in
+                    use(r.first(where: { norm($0["collectionName"]).hasPrefix(al) })?["artworkUrl100"] as? String)
+                }
+            }
+        }
     }
 
     private func loadArtwork(_ urlStr: String) {

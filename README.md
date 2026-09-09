@@ -125,6 +125,8 @@ open "kajo://config"            # or the menu-bar Settings… item
 
 ## Status
 
+v0.27.3 — Now Playing artwork fallback picks only exact-artist hits (the first iTunes result is often a lullaby/8-bit cover), prefers the same album, and falls back to artist → album lookup for catalogues that never surface in song search (TOOL).
+
 v0.27.2 — terminal: slide-out animation stays visible above the app that gets focus back (floating level for the 0.14 s only); zoom chords match the typed character, so ⌘⇧0 (`=` on Nordic layouts) and ⌘⇧- work.
 
 v0.27.1 — terminal polish (follow-the-active-Space via `.moveToActiveSpace`, auto-hide on focus loss on its own screen, slide animation, ⌘+/−/0 zoom, `kajo://terminal/send?text=…` and `/paste`, normal window level) and a **Now Playing fallback**: when macOS denies AppleScript to Spotify (TCC -1743, no prompt), the Music tab follows Spotify's own playback notification and fetches cover art from the iTunes Search API (no key).
