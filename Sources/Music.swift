@@ -26,6 +26,36 @@ final class NowPlayingModel: ObservableObject {
 
     private var timer: Timer?
     private var artURL: String?
+    private var lastNotification: Date?   // Spotify's own PlaybackStateChanged — needs no Automation grant
+
+    init() {
+        // Same source SketchyBar uses. Keeps the tab alive when AppleScript to Spotify is denied (TCC -1743).
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.spotify.client.PlaybackStateChanged"), object: nil, queue: .main
+        ) { [weak self] n in self?.applyNotification(n.userInfo) }
+    }
+
+    private func applyNotification(_ info: [AnyHashable: Any]?) {
+        guard let info else { return }
+        let state = (info["Player State"] as? String ?? "").lowercased()
+        lastNotification = Date()
+        guard state != "stopped", let name = info["Name"] as? String, !name.isEmpty else {
+            hasTrack = false; isPlaying = false; title = ""; artist = ""; album = ""; progress = 0; return
+        }
+        hasTrack = true
+        isPlaying = state == "playing"
+        let newArtist = info["Artist"] as? String ?? ""
+        if name != title || newArtist != artist {
+            artwork = nil; artURL = nil
+            fetchArtworkFallback(track: name, artist: newArtist)   // Spotify's URL only comes via AppleScript
+        }
+        title = name
+        artist = newArtist
+        album = info["Album"] as? String ?? ""
+        let durMs = (info["Duration"] as? NSNumber)?.doubleValue ?? 0
+        let pos = (info["Playback Position"] as? NSNumber)?.doubleValue ?? 0
+        progress = durMs > 0 ? min(1, max(0, pos / (durMs / 1000))) : 0
+    }
 
     private let infoScript = """
     set out to ""
@@ -63,6 +93,8 @@ final class NowPlayingModel: ObservableObject {
 
     private func apply(_ lines: [String]) {
         guard lines.count >= 7, !lines[0].isEmpty else {
+            // AppleScript gave nothing. If Spotify's notification is feeding us, don't wipe its state.
+            if lastNotification != nil, NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == "com.spotify.client" }) { return }
             hasTrack = false; isPlaying = false
             title = ""; artist = ""; album = ""; artwork = nil; artURL = nil; progress = 0
             return
@@ -74,6 +106,26 @@ final class NowPlayingModel: ObservableObject {
         let pos = Double(lines[6].replacingOccurrences(of: ",", with: ".")) ?? 0
         progress = durMs > 0 ? min(1, max(0, pos / (durMs / 1000))) : 0
         if lines[4] != artURL { artURL = lines[4]; loadArtwork(lines[4]) }
+    }
+
+    /// Cover art without Automation rights: Apple's public iTunes Search API (no key). Upscales the
+    /// 100px thumbnail URL to 600px. Ignored if Spotify's own artwork arrives via AppleScript first.
+    private func fetchArtworkFallback(track: String, artist: String) {
+        var comps = URLComponents(string: "https://itunes.apple.com/search")!
+        comps.queryItems = [.init(name: "term", value: "\(artist) \(track)"), .init(name: "entity", value: "song"), .init(name: "limit", value: "1")]
+        guard let url = comps.url else { return }
+        let wantTitle = track
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let first = (json["results"] as? [[String: Any]])?.first,
+                  let art = first["artworkUrl100"] as? String else { return }
+            let big = art.replacingOccurrences(of: "100x100bb", with: "600x600bb")
+            DispatchQueue.main.async {
+                guard let self, self.title == wantTitle, self.artwork == nil else { return }   // still the same track, nothing better arrived
+                self.loadArtwork(big)
+            }
+        }.resume()
     }
 
     private func loadArtwork(_ urlStr: String) {

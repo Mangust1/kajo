@@ -118,8 +118,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelega
         // kajo://terminal — quake-style drop-down terminal pinned to one Space (Terminal.swift);
         // kajo://terminal/repin — re-place it on the current Space/screen.
         if url.host == "terminal" {
-            if url.pathComponents.last == "repin" { TerminalWindowController.shared.repin() }
-            else { TerminalWindowController.shared.toggle() }
+            let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            func flag(_ n: String) -> Bool { ["1", "true", "yes"].contains((q.first { $0.name == n }?.value ?? "").lowercased()) }
+            switch url.pathComponents.last {
+            case "repin": TerminalWindowController.shared.repin()
+            case "send":  // kajo://terminal/send?text=…&enter=1&show=1
+                if let text = q.first(where: { $0.name == "text" })?.value {
+                    TerminalWindowController.shared.send(text: text, enter: flag("enter"), show: flag("show"))
+                }
+            case "paste": // kajo://terminal/paste[?enter=1&show=1] — clipboard text into the prompt
+                if let text = NSPasteboard.general.string(forType: .string) {
+                    TerminalWindowController.shared.send(text: text, enter: flag("enter"), show: flag("show"))
+                }
+            default: TerminalWindowController.shared.toggle()
+            }
             return
         }
         if let tab = Tab(rawValue: name) {

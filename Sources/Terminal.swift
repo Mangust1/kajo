@@ -99,6 +99,13 @@ final class KajoTerminalView: LocalProcessTerminalView {
     /// macOS-style editing chords → readline/Claude-Code sequences, so Option stays a
     /// character key (Nordic { } [ ] | \ @ $) yet Option/Cmd+arrows still move by word/line.
     ///   ⇧↩ = ESC CR (newline) · ⌥←/⌥→ = ESC b / ESC f · ⌥⌫ = Ctrl+W · ⌘←/⌘→ = Home / End · ⌘⌫ = Ctrl+U
+    /// ⌘+ / ⌘= bigger, ⌘- smaller, ⌘0 back to the configured size.
+    var baseFontSize: CGFloat = 11
+    private func zoom(_ delta: CGFloat?) {
+        let size = delta.map { min(max(font.pointSize + $0, 6), 40) } ?? baseFontSize
+        font = NSFont(name: font.fontName, size: size) ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
     /// Called from TerminalWindow.sendEvent (SwiftTerm's keyDown is not `open`). Returns true if consumed.
     func handleEditingChord(_ event: NSEvent) -> Bool {
         // Arrow keys carry .function AND .numericPad; ignore those (and Caps Lock) when matching.
@@ -119,6 +126,12 @@ final class KajoTerminalView: LocalProcessTerminalView {
             }
         }
         if flags == [.command] {
+            switch chars {
+            case "+", "=": zoom(+1); return true
+            case "-":      zoom(-1); return true
+            case "0":      zoom(nil); return true
+            default: break
+            }
             switch key {
             case NSLeftArrowFunctionKey:  send([0x1b, 0x5b, 0x48]); return true   // Home (ESC [ H)
             case NSRightArrowFunctionKey: send([0x1b, 0x5b, 0x46]); return true   // End  (ESC [ F)
@@ -173,6 +186,18 @@ final class TerminalWindowController: NSObject, LocalProcessTerminalViewDelegate
         w.setFrame(targetFrame(on: activeScreen()), display: false)
         show()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { w.collectionBehavior = previous }
+    }
+
+    /// kajo://terminal/send?text=…[&enter=1][&show=1] and kajo://terminal/paste — inject text into the
+    /// running program (e.g. a Claude prompt) without necessarily showing the window.
+    func send(text: String, enter: Bool, show: Bool) {
+        if window == nil { build(on: activeScreen()) }
+        guard let t = term else { return }
+        if !processAlive { spawn() }
+        t.send(txt: text)
+        if enter { t.send([0x0d]) }
+        if show, !isShown { self.show() }
+        tlog("send: \(text.count) chars enter=\(enter) show=\(show)")
     }
 
     // MARK: window lifecycle
@@ -266,14 +291,19 @@ final class TerminalWindowController: NSObject, LocalProcessTerminalViewDelegate
             previousApp = front
         }
         if !processAlive { spawn() }
-        if !config.pinToSpace && !w.isOnActiveSpace {
-            // Follow mode: size for the screen the mouse is on; .moveToActiveSpace does the Space move.
-            w.setFrame(targetFrame(on: activeScreen()), display: false)
-        }
-        refit(w)                         // displays may have changed since last time (dock/undock)
+        let screen = (!config.pinToSpace && !w.isOnActiveSpace) ? activeScreen()
+                   : (w.screen ?? NSScreen.screens.first { $0.frame.intersects(w.frame) } ?? activeScreen())
+        let target = targetFrame(on: screen)      // also re-fits after dock/undock
+        // Slide in from above the screen edge (quake feel), like the panel does.
+        w.setFrame(target.offsetBy(dx: 0, dy: target.height + 20), display: false)
         w.ignoresMouseEvents = false
         w.alphaValue = 1
         w.makeKeyAndOrderFront(nil)     // follow mode: .moveToActiveSpace carries it here
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            w.animator().setFrame(target, display: true)
+        }
         NSApp.activate(ignoringOtherApps: true)
         w.makeFirstResponder(t)
         isShown = true
@@ -284,8 +314,15 @@ final class TerminalWindowController: NSObject, LocalProcessTerminalViewDelegate
         guard let w = window else { return }
         tlog("hide: key=\(w.isKeyWindow) onActiveSpace=\(w.isOnActiveSpace) appActive=\(NSApp.isActive)")
         isShown = false
-        w.alphaValue = 0                // stays ordered-in → keeps its Space
         w.ignoresMouseEvents = true
+        let up = w.frame.offsetBy(dx: 0, dy: w.frame.height + 20)
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.14
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            w.animator().setFrame(up, display: true)
+        }, completionHandler: {
+            w.alphaValue = 0            // stays ordered-in → keeps its Space
+        })
         if NSApp.isActive { previousApp?.activate() }   // hand focus back, like the panel does
     }
 
@@ -319,6 +356,7 @@ final class TerminalWindowController: NSObject, LocalProcessTerminalViewDelegate
     private func style(_ t: KajoTerminalView) {
         t.font = NSFont(name: config.fontName, size: config.fontSize)
             ?? NSFont.monospacedSystemFont(ofSize: config.fontSize, weight: .regular)
+        t.baseFontSize = config.fontSize
         t.nativeBackgroundColor = Gruv.termBg
         t.nativeForegroundColor = NSColor(hex: 0xebdbb2)
         t.caretColor = NSColor(hex: 0xbdae93)
