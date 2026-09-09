@@ -1,0 +1,14 @@
+{
+  "command": [
+    "/bin/zsh",
+    "-lc",
+    "~/.config/kajo/terminal.sh"
+  ],
+  "width": 0.8,
+  "height": 0.5,
+  "topGap": 40,
+  "font": "Iosevka NFM",
+  "fontSize": 11,
+  "borderWidth": 2,
+  "pinToSpace": false
+}

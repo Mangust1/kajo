@@ -20,5 +20,7 @@ blank. These files are the generic starting points; your real config lives in
 | `ai.json` | oMLX base URL. |
 | `currency.json` | Currencies in the converter (`code` + `flag`). EUR is the base, always shown first. Codes must be ones Frankfurter serves. |
 | `ha.json` / `unifi.json` / `pi.json` | Home Assistant / UniFi / Pi-health endpoints + tokens (secrets — `chmod 600`). The tab shows a "needs config" hint until present. |
+| `terminal.json` | The drop-down **terminal window** (`kajo://terminal`): `command` to run, size (`width`/`height` as screen fractions), `topGap` (px to leave for a status bar like SketchyBar), `font`, `fontSize`. Without it: 80 % × 50 %, 40 px gap, Iosevka NFM 11. |
+| `terminal.sh` | Default command when present (`chmod +x`): attaches a persistent **tmux** session so shells/agents survive Kajo restarts. Delete it for a plain login shell, or point `terminal.json` → `command` elsewhere. |
 
 Paths support `~`. A missing or partial file just falls back to defaults.

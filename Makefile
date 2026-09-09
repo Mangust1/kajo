@@ -6,7 +6,7 @@ LSREG    := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchS
 SIGN_ID  ?= Kajo Self-Signed
 DEV_APP  := Kajo Dev.app
 
-.PHONY: build run install reload dev check clean
+.PHONY: build run install reload dev check clean distclean
 
 # Sign every build with a stable self-signed identity so macOS TCC grants
 # (Spotify automation, Bluetooth, Location) persist across rebuilds.
@@ -14,14 +14,15 @@ build: $(EXEC) $(PLIST)
 	@mkdir -p $(BUNDLE)/Contents/Resources && cp assets/Kajo.icns $(BUNDLE)/Contents/Resources/Kajo.icns
 	@codesign --force --sign "$(SIGN_ID)" $(BUNDLE) && echo "[codesign] $(BUNDLE) signed with '$(SIGN_ID)'"
 
-# Pin the deployment target to what Info.plist promises (LSMinimumSystemVersion 14.0);
-# without -target swiftc silently uses the build host's OS as the minimum.
-TARGET   := $(shell uname -m)-apple-macos14.0
-SWIFTC   := swiftc -O -swift-version 5 -target $(TARGET)
+# Build via SwiftPM (Package.swift): deployment target = platforms .macOS(.v14), language
+# mode = Swift 5 (swiftLanguageVersions). SwiftTerm (terminal window) is the only dependency;
+# first build fetches + compiles it once (~1 min), later builds are incremental in .build/.
+SWIFT_BUILD := swift build
 
-$(EXEC): Sources/*.swift
+$(EXEC): Sources/*.swift Package.swift
+	$(SWIFT_BUILD) -c release
 	@mkdir -p $(BUNDLE)/Contents/MacOS
-	$(SWIFTC) Sources/*.swift -o $(EXEC)
+	@cp .build/release/Kajo $(EXEC)
 
 $(PLIST): Info.plist
 	@mkdir -p $(BUNDLE)/Contents
@@ -53,7 +54,8 @@ install: build
 # runs alongside the installed daily driver without clobbering it. No LaunchAgent.
 dev:
 	@mkdir -p "$(DEV_APP)/Contents/MacOS" "$(DEV_APP)/Contents/Resources"
-	$(SWIFTC) -DDEBUG Sources/*.swift -o "$(DEV_APP)/Contents/MacOS/Kajo Dev"
+	$(SWIFT_BUILD) -c debug          # debug config defines DEBUG
+	@cp .build/debug/Kajo "$(DEV_APP)/Contents/MacOS/Kajo Dev"
 	@cp assets/Kajo.icns "$(DEV_APP)/Contents/Resources/Kajo.icns"
 	@sed -e 's#<string>Kajo</string>#<string>Kajo Dev</string>#g' \
 	     -e 's#fi\.mangusti\.kajo#fi.mangusti.kajo.dev#g' \
@@ -67,10 +69,13 @@ dev:
 
 # Headless self-check: a -DDEBUG binary runs the asserts, then exits via --clean-url.
 check:
-	@mkdir -p .check
-	$(SWIFTC) -DDEBUG Sources/*.swift -o .check/kajo
-	@.check/kajo --clean-url "https://example.com/?utm_source=x" >/dev/null && echo "check OK"
+	$(SWIFT_BUILD) -c debug
+	@.build/debug/Kajo --clean-url "https://example.com/?utm_source=x" >/dev/null && echo "check OK"
 
 clean:
 	@rm -rf $(BUNDLE) "$(DEV_APP)" .check
-	@echo "cleaned"
+	@echo "cleaned (SwiftPM cache in .build/ kept; \`make distclean\` removes it)"
+
+distclean: clean
+	@rm -rf .build
+	@echo "removed .build/"

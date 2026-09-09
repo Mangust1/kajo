@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelega
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installEditMenu()
         NSApp.setActivationPolicy(.accessory)
         // Only ask for what the enabled tabs need — a fresh install shouldn't get three prompts.
         // Instantiating a central manager triggers the Bluetooth permission
@@ -70,6 +71,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelega
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {}
 
+    /// Agent apps have no menu bar, so ⌘C/⌘V/⌘X/⌘A never reach the responder chain unless an
+    /// Edit menu declares the key equivalents. Needed by the terminal window (paste, incl.
+    /// clipboard images) and it also fixes paste into the panel's text fields.
+    private func installEditMenu() {
+        let main = NSMenu()
+        let editItem = NSMenuItem()
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        main.addItem(editItem)
+        NSApp.mainMenu = main
+    }
+
     @objc func handleURLEvent(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
         guard let str = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
               let url = URL(string: str) else { return }
@@ -98,9 +115,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelega
         // Accept both  kajo://tab/calendar  and  kajo://calendar
         let raw = (url.host == "tab" ? url.pathComponents.last : url.host) ?? ""
         let name = raw.lowercased()
-        // Quake terminal ON HOLD — Hammerspoon (Ctrl+') handles it for now. QuakeController
-        // is kept dormant; re-enable by uncommenting the two lines below.
-        // if name == "quake" { QuakeController.shared.toggle(); return }
+        // kajo://terminal — quake-style drop-down terminal pinned to one Space (Terminal.swift);
+        // kajo://terminal/repin — re-place it on the current Space/screen.
+        if url.host == "terminal" {
+            if url.pathComponents.last == "repin" { TerminalWindowController.shared.repin() }
+            else { TerminalWindowController.shared.toggle() }
+            return
+        }
         if let tab = Tab(rawValue: name) {
             controller.toggle(tab: tab)
         } else {

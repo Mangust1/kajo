@@ -4,12 +4,14 @@
 
 > ⚠️ **100% vibe-coded — use at your own risk.** Built almost entirely by AI pair-programming (Claude Code). No warranty, no guarantees; it may misbehave or eat your config. Read the code before you run it.
 
-A Noctalia-inspired drop-down control center for macOS: **one translucent, Gruvbox-themed window with everything on tabs**, summoned pre-switched to whichever tab you ask for. Pure `swiftc` + a Makefile — **no Xcode**. Runs as an `LSUIElement` agent (no dock icon).
+A Noctalia-inspired drop-down control center for macOS: **one translucent, Gruvbox-themed window with everything on tabs**, summoned pre-switched to whichever tab you ask for. Built with `swift build` (SwiftPM, one dependency: [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)) + a Makefile — **no Xcode project**. Runs as an `LSUIElement` agent (no dock icon).
 
 16 tabs. Some work for anyone; some expect the author's home-lab and just show a "No config" hint until you point them at your own services:
 
 - **Universal:** Calendar (world clocks + weather + events), Timer, Now Playing (Spotify), Sound (output/input + Bluetooth audio battery levels — AirPods L/R/case), Power, Network (Wi-Fi scan/join, service priority, copy-able local/public IP, and a speed test — built-in `networkQuality` or live-streaming Ookla `speedtest`), System (Keep Awake with optional timer + Empty Trash + a Settings button), Memes, Clipboard (with a URL tracking cleaner — strips tracking params + Echobox/xtor fragments, `kajo://clip/clean` — and send-to-Android via KDE Connect), Currency (configurable multi-currency converter via ECB rates, no API key), Hours (a stopwatch-plus-text work-hour tracker that logs entries per day, edits/resumes them, tags each with a **Severa project·phase** and **uploads a day at a time straight to Severa** — rounding up to the next 30 min, updating the existing row on re-upload — or one-click copies a chronological month list, with a floating always-on-top window to park beside the browser).
 - **Needs your own backend (optional):** UniFi, Home (Home Assistant), Pi (a small health container), VPN, AI (a local oMLX server).
+
+**Plus a terminal window** (`kajo://terminal`, not a tab): a quake-style drop-down terminal (SwiftTerm). Summon it and it appears on the Space and screen you're on; click anything else on that screen and it hides (focus moving to your other display leaves it up). Optional `"pinToSpace": true` instead pins it to one Space and makes summoning jump there. Runs whatever `~/.config/kajo/terminal.sh` says (default example attaches a persistent tmux session), gruvbox, 80 % × 50 % under your status bar, ⌘V pastes clipboard **images** straight into Claude Code, files can be dropped in, ⌥/⌘+arrows edit like a native Mac text field. `kajo://terminal/repin` re-places it on the current Space.
 
 > ⚠️ It's a personal tool, not a polished product. It has a **built-in menu-bar icon** (plus `kajo://tab/<name>` URLs) to summon the panel, and reads optional per-module config from `~/.config/kajo/` — editable in a built-in **Settings window** (menu-bar → *Settings…*, the System tab's Settings button, or `kajo://config`) with typed forms *and* a raw-JSON view per file, or by hand (see `config-examples/`). Getting it running on a fresh Mac still means building it and sorting out code-signing — `./install.sh` (below) or the Claude Code prompt handles that.
 
@@ -35,8 +37,8 @@ Open this folder in [Claude Code](https://claude.com/claude-code) and paste the 
 ````text
 You're helping me install "Kajo", a SwiftUI/AppKit macOS menu-tool
 that lives in this repo (Sources/*.swift — one file per tab plus Theme/Config/Panel/App
-infra; built with swiftc via the Makefile —
-no Xcode). It's the original author's personal control-center, so part of your job
+infra; built with `swift build` via the Makefile — Package.swift, SwiftTerm is the only
+dependency, no Xcode project). It's the original author's personal control-center, so part of your job
 is to make it work on MY Mac and strip out anything hardwired to them. Read
 the Sources/*.swift files (start with main.swift + Panel.swift), the Makefile, and Info.plist first, then walk me through this,
 asking me before anything that needs my input. Explain trade-offs; don't assume I
@@ -110,6 +112,7 @@ make install
 
 # 2. summon a tab
 open "kajo://tab/calendar"      # or music, sound, power, network, timer, system…
+open -g "kajo://terminal"       # toggle the drop-down terminal (pinned to its Space)
 
 # 3. configure (optional) — GUI editor for ~/.config/kajo/*.json
 open "kajo://config"            # or the menu-bar Settings… item
@@ -121,6 +124,8 @@ open "kajo://config"            # or the menu-bar Settings… item
 - **Optional configs:** `~/.config/kajo/{unifi,ha,pi}.json` (mode 600). Absent = that tab shows "No config".
 
 ## Status
+
+v0.27 — **terminal window** (`kajo://terminal`): quake-style drop-down (follows you to the active Space via `.moveToActiveSpace`, auto-hides on focus loss on its own screen, optional pinned mode), Kajo-drawn focus frame, built on SwiftTerm — which is why the build moved from a raw `swiftc` glob to **SwiftPM** (`Package.swift`, `swift build` behind the same `make` targets). Cmd+V forwards clipboard images to Claude Code, file drag-and-drop types paths, ⌥/⌘+arrow/backspace editing chords, Edit menu so ⌘C/⌘V work in an agent app, `terminal.json` + `terminal.sh` config, Raycast script `kajo-terminal.sh`.
 
 v0.26 — hardening pass after a full code review (no new features, everything still works the same). **Hours/Severa:** days are bucketed in the timesheet's timezone (`severa.json` `"timeZone"`, default Europe/Helsinki) instead of the Mac's, so travelling can't re-key uploaded days and duplicate rows; `hours.json` is written atomically + `0600` and an unreadable log is set aside as `hours.json.corrupt-…` instead of being silently overwritten; upload records moved from UserDefaults to `hours-uploads.json` next to the log (auto-migrated); a 401 drops the cached token and retries once; failures show the HTTP code + body; entries whose phase has no work type now count as unassigned; a ⚠ marks days whose uploaded row no longer matches the log (Kajo **never deletes or edits rows it didn't create** — fix those in Severa, then "Forget"); the Severa model is app-lifetime (no refetch per tab visit); + then Cancel no longer leaves a 1 h ghost entry. **Elsewhere:** Home Assistant validates TLS normally (Let's Encrypt); UniFi trusts its self-signed cert only for the configured host and re-logs-in only on 401; clipboard history + "→ vim" hand-off files are owner-only and the temp file is deleted after nvim reads it; config typos (Pi `remote`, Calendar `tz`) no longer crash-loop; pollers have in-flight guards; countdown timer is wall-clock based (sleep-safe); meme thumbnails are cached + decoded off-main; `kajo://config` works; `make install` replaces the bundle whole and relaunches; `make check` runs the headless self-check; swiftc gets an explicit `-target …-macos14.0`; one shared `shell()` / `loadConfigJSON()` / `writePrivate()` / `hint()` instead of five copies.
 

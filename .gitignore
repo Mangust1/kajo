@@ -8,3 +8,6 @@ Kajo Dev.app/
 
 # self-check build
 .check/
+
+# SwiftPM
+.build/
