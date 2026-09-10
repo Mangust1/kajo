@@ -25,8 +25,15 @@ struct VPNEntry: Identifiable {
 
 final class VPNModel: ObservableObject {
     @Published var twingate = VPNEntry(id: "tg", name: "Twingate", app: "Twingate", active: false, ip: "")
-    @Published var openvpn  = VPNEntry(id: "ov", name: "OpenVPN", app: "OpenVPN Connect", active: false, ip: "")
     @Published var nordvpn  = VPNEntry(id: "nd", name: "NordVPN", app: "NordVPN", active: false, ip: "")
+    // OpenVPN is controllable like Tailscale: the `vpn` CLI (dotfiles/bin) talks to a root
+    // openvpn LaunchDaemon over its management socket, so no sudo from a GUI app.
+    // vpn.json: { "profile": "weare", "vpnBin": "~/bin/vpn" }
+    @Published var openvpnUp = false
+    @Published var openvpnIP = ""
+    @Published var openvpnBusy = false
+    let openvpnProfile: String
+    private let vpnBin: String
     // Tailscale is *controllable* (connect/disconnect via its CLI), unlike the
     // launch-only VPNs above. Its IP is also 100.64/10, so we detect it via the
     // CLI and exclude its address from the Twingate heuristic.
@@ -36,8 +43,14 @@ final class VPNModel: ObservableObject {
 
     private static let tsBin = "/opt/homebrew/bin/tailscale"
     private var timer: Timer?
-    var entries: [VPNEntry] { [twingate, openvpn, nordvpn] }
-    var anyActive: Bool { twingate.active || openvpn.active || nordvpn.active || tailscaleUp }
+    var entries: [VPNEntry] { [twingate, nordvpn] }
+    var anyActive: Bool { twingate.active || openvpnUp || nordvpn.active || tailscaleUp }
+
+    init() {
+        let j = loadConfigJSON("vpn")
+        openvpnProfile = j["profile"] as? String ?? "weare"
+        vpnBin = ((j["vpnBin"] as? String) ?? "~/bin/vpn").replacingOccurrences(of: "~", with: NSHomeDirectory())
+    }
 
     func startPolling() {
         stopPolling(); refresh()
@@ -72,11 +85,13 @@ final class VPNModel: ObservableObject {
                 else { ov = true; ovip = ip }                                                         // OpenVPN
             }
             if tg && !self.processRunning("Twingate") { tg = false; tgip = "" }
-            if ov && !self.processRunning("ovpnagent") { ov = false; ovip = "" }
+            // The held daemon is a running `openvpn` with no utun, so the utun check is what matters;
+            // the process check only rules out unrelated utuns. ovpnagent = OpenVPN Connect fallback.
+            if ov && !self.processRunning("openvpn") && !self.processRunning("ovpnagent") { ov = false; ovip = "" }
             DispatchQueue.main.async {
                 if !self.tailscaleBusy { self.tailscaleUp = tsUp; self.tailscaleIP = tsip }
+                if !self.openvpnBusy { self.openvpnUp = ov; self.openvpnIP = ovip }
                 self.twingate.active = tg; self.twingate.ip = tgip
-                self.openvpn.active = ov;  self.openvpn.ip = ovip
                 self.nordvpn.active = nd;  self.nordvpn.ip = ndip
             }
         }
@@ -127,6 +142,19 @@ final class VPNModel: ObservableObject {
             DispatchQueue.main.async { self?.tailscaleBusy = false; self?.refresh() }
         }
     }
+
+    /// `vpn connect <profile>` opens the SSO page in the browser and returns once CONNECTED
+    /// (or gives up after 5 min); `vpn down` is immediate. Busy until either returns.
+    func toggleOpenVPN() {
+        openvpnBusy = true
+        let goingUp = !openvpnUp
+        let (bin, profile) = (vpnBin, openvpnProfile)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = shell(bin, [goingUp ? "connect" : "down", profile])
+            Thread.sleep(forTimeInterval: 0.6)
+            DispatchQueue.main.async { self?.openvpnBusy = false; self?.refresh() }
+        }
+    }
 }
 
 struct VPNTab: View {
@@ -134,28 +162,11 @@ struct VPNTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Tailscale — connect/disconnect right here (CLI-controlled).
-            HStack(spacing: 11) {
-                Image(systemName: model.tailscaleUp ? "lock.fill" : "lock.open")
-                    .font(.system(size: 16)).frame(width: 22)
-                    .foregroundStyle(model.tailscaleUp ? Gruv.green : Gruv.fg4)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Tailscale").foregroundStyle(Gruv.fg1)
-                    Text(model.tailscaleUp ? "Connected · \(model.tailscaleIP)" : "Off")
-                        .font(.caption)
-                        .foregroundStyle(model.tailscaleUp ? Gruv.green : Gruv.gray)
-                }
-                Spacer()
-                if model.tailscaleBusy {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Toggle("", isOn: Binding(get: { model.tailscaleUp }, set: { _ in model.toggleTailscale() }))
-                        .labelsHidden().toggleStyle(.switch).tint(Gruv.green)
-                }
-            }
-            .padding(.vertical, 9).padding(.horizontal, 10)
-            .background(RoundedRectangle(cornerRadius: 10)
-                .fill(model.tailscaleUp ? Gruv.green.opacity(0.12) : Gruv.bg1.opacity(0.5)))
+            // Controllable VPNs — connect/disconnect right here via their CLIs.
+            controlRow("Tailscale", up: model.tailscaleUp, ip: model.tailscaleIP, busy: model.tailscaleBusy,
+                       toggle: model.toggleTailscale)
+            controlRow("OpenVPN · \(model.openvpnProfile)", up: model.openvpnUp, ip: model.openvpnIP, busy: model.openvpnBusy,
+                       offText: model.openvpnBusy ? "Waiting for browser login…" : "Off", toggle: model.toggleOpenVPN)
 
             ForEach(model.entries) { vpn in
                 Button { AppLauncher.openApp(named: vpn.app) } label: {
@@ -180,5 +191,30 @@ struct VPNTab: View {
             }
             Spacer()
         }
+    }
+
+    private func controlRow(_ name: String, up: Bool, ip: String, busy: Bool, offText: String = "Off",
+                            toggle: @escaping () -> Void) -> some View {
+        HStack(spacing: 11) {
+            Image(systemName: up ? "lock.fill" : "lock.open")
+                .font(.system(size: 16)).frame(width: 22)
+                .foregroundStyle(up ? Gruv.green : Gruv.fg4)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name).foregroundStyle(Gruv.fg1)
+                Text(up ? "Connected · \(ip)" : offText)
+                    .font(.caption)
+                    .foregroundStyle(up ? Gruv.green : Gruv.gray)
+            }
+            Spacer()
+            if busy {
+                ProgressView().controlSize(.small)
+            } else {
+                Toggle("", isOn: Binding(get: { up }, set: { _ in toggle() }))
+                    .labelsHidden().toggleStyle(.switch).tint(Gruv.green)
+            }
+        }
+        .padding(.vertical, 9).padding(.horizontal, 10)
+        .background(RoundedRectangle(cornerRadius: 10)
+            .fill(up ? Gruv.green.opacity(0.12) : Gruv.bg1.opacity(0.5)))
     }
 }

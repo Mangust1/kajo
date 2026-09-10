@@ -70,7 +70,7 @@ let noConfigTabs: [PlaceholderTab] = [
     .init(title: "Sound", symbol: "speaker.wave.2.fill", note: "Nothing to configure — output picker + Bluetooth battery work out of the box. `blueutil` is optional (for BT connect/disconnect)."),
     .init(title: "Power", symbol: "bolt.fill", note: "Nothing to configure — reads battery/SMC data from IOKit."),
     .init(title: "Network", symbol: "wifi", note: "No JSON config. The Wi-Fi priority toggle needs a sudoers rule (see the README's Installation notes)."),
-    .init(title: "VPN", symbol: "lock.fill", note: "Nothing to configure — auto-detects Twingate / OpenVPN / NordVPN / Tailscale."),
+    .init(title: "VPN", symbol: "lock.fill", note: "vpn.json: { \"profile\": \"weare\" } picks the OpenVPN profile the toggle drives via the `vpn` CLI (root LaunchDaemon, no sudo at runtime). Twingate / NordVPN / Tailscale need nothing."),
     .init(title: "System", symbol: "slider.horizontal.3", note: "Nothing to configure — Keep Awake and Empty Trash need no settings."),
     .init(title: "Memes", symbol: "photo.stack", note: "Nothing to configure — add and tag images in the tab itself; they're stored under ~/.config/kajo/memes/."),
 ]
