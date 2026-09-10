@@ -338,7 +338,10 @@ final class PanelController {
     }
 
     private func topRightOrigin() -> NSPoint {
-        guard let screen = NSScreen.main else { return .zero }
+        // Screen under the mouse = the SketchyBar you clicked. NSScreen.main is the screen of
+        // the focused app's window, which sent the panel to the other display.
+        let mouse = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main else { return .zero }
         let vf = screen.visibleFrame
         let gap: CGFloat = 8
         return NSPoint(x: vf.midX - size.width / 2,
