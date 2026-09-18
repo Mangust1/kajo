@@ -17,7 +17,9 @@ build: $(EXEC) $(PLIST)
 # Build via SwiftPM (Package.swift): deployment target = platforms .macOS(.v14), language
 # mode = Swift 5 (swiftLanguageVersions). SwiftTerm (terminal window) is the only dependency;
 # first build fetches + compiles it once (~1 min), later builds are incremental in .build/.
-SWIFT_BUILD := swift build
+# --build-system native: the Swift 6.4 default (swiftbuild) compiles SwiftTerm's Shaders.metal and
+# needs Xcode's separately-downloaded Metal toolchain; the legacy build system just skips it.
+SWIFT_BUILD := swift build --build-system native
 
 $(EXEC): Sources/*.swift Package.swift
 	$(SWIFT_BUILD) -c release
