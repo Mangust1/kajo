@@ -125,6 +125,8 @@ open "kajo://config"            # or the menu-bar Settings… item
 
 ## Status
 
+v0.28.1 — Hours tab **auto-focuses the task field** when it opens (panel show or tab switch), so you can type straight away — skipped while a timer is running, which never steals focus mid-work.
+
 v0.28 — **OpenVPN toggle** in the VPN tab, same switch as Tailscale: it drives the `vpn` CLI (dotfiles/bin) which talks to a root openvpn LaunchDaemon over its management socket — no sudo from the app, SAML/WEB_AUTH logins pop up in the browser and the row spins until the tunnel is up. Profile via `vpn.json` (`{ "profile": "weare" }`). Replaces the launch-OpenVPN-Connect row.
 
 v0.27.3 — Now Playing artwork fallback picks only exact-artist hits (the first iTunes result is often a lullaby/8-bit cover), prefers the same album, and falls back to artist → album lookup for catalogues that never surface in song search (TOOL).

@@ -97,6 +97,7 @@ final class HoursModel: ObservableObject {
     @Published var month = HoursModel.monthStart(Date())    // month shown in the log
     @Published private var uploads: [String: UploadRecord] = [:]   // bucketKey -> what's on Severa
     @Published var warning: String?                          // e.g. the log file was unreadable
+    @Published var focusDraft = 0                            // bumped when the tab becomes visible with no timer running
 
     private let url = URL(fileURLWithPath: kajoConfigDir + "/hours.json")
     // Upload records live NEXT TO the log (not UserDefaults): a restore/reinstall that
@@ -410,9 +411,9 @@ struct HoursTab: View {
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 10) {
-                        TextField("What are you working on?", text: $model.draft)
-                            .textFieldStyle(.plain).foregroundColor(Gruv.fg1)
-                            .onSubmit { beginTracking() }
+                        FocusedTextField(text: $model.draft, placeholder: "What are you working on?",
+                                         onSubmit: { beginTracking() }, focusToken: model.focusDraft)
+                            .frame(maxWidth: .infinity)
                         Button { beginTracking() } label: {
                             Image(systemName: "play.circle.fill").font(.system(size: 30)).foregroundColor(Gruv.green)
                         }.buttonStyle(.plain).help("Start")

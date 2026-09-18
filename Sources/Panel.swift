@@ -242,6 +242,12 @@ final class PanelController {
         if panel.isVisible && tab == .ai { ai.startPolling() } else { ai.stopPolling() }
         if panel.isVisible && tab == .memes { memes.search = ""; memes.load(); NSApp.activate(ignoringOtherApps: true) }
         if panel.isVisible && tab == .clipboard { clipboard.search = ""; NSApp.activate(ignoringOtherApps: true) }
+        // Hours: put the caret in the task field so you can just type — but never while a
+        // timer runs (that card has no field, and stealing focus mid-work is rude).
+        if panel.isVisible && tab == .hours && hours.running == nil {
+            NSApp.activate(ignoringOtherApps: true)          // non-activating panel: needed for keyboard focus
+            hours.focusDraft += 1
+        }
     }
 
     func toggle(tab: Tab) {

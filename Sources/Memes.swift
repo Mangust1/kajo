@@ -190,6 +190,7 @@ struct FocusedTextField: NSViewRepresentable {
     @Binding var text: String
     var placeholder: String
     var onSubmit: () -> Void = {}
+    var focusToken: Int = 0        // bump to re-grab focus on an already-created field (panel re-show)
 
     func makeNSView(context: Context) -> NSTextField {
         let tf = NSTextField()
@@ -201,16 +202,22 @@ struct FocusedTextField: NSViewRepresentable {
         tf.textColor = NSColor(Gruv.fg1)
         tf.delegate = context.coordinator
         tf.lineBreakMode = .byTruncatingTail
+        context.coordinator.lastFocusToken = focusToken
         DispatchQueue.main.async { tf.window?.makeFirstResponder(tf) }
         return tf
     }
     func updateNSView(_ tf: NSTextField, context: Context) {
         context.coordinator.parent = self           // keep the binding fresh so edits propagate
         if tf.stringValue != text { tf.stringValue = text }
+        if context.coordinator.lastFocusToken != focusToken {
+            context.coordinator.lastFocusToken = focusToken
+            DispatchQueue.main.async { tf.window?.makeFirstResponder(tf) }
+        }
     }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var parent: FocusedTextField
+        var lastFocusToken = 0
         init(_ p: FocusedTextField) { parent = p }
         func controlTextDidChange(_ note: Notification) {
             if let tf = note.object as? NSTextField { parent.text = tf.stringValue }
