@@ -23,6 +23,16 @@ final class NowPlayingModel: ObservableObject {
     @Published var isPlaying = false
     @Published var hasTrack = false
     @Published var progress: Double = 0   // 0...1
+    @Published var positionSec: Double = 0
+    @Published var durationSec: Double = 0
+    /// osascript got -1743 while Spotify is running. Every time so far the cause was Spotify
+    /// updating itself in place: the running binary no longer matches the bundle on disk, so
+    /// tccd "cannot create an attribution chain" and refuses AppleEvents for every client
+    /// until Spotify is relaunched. Nothing in Kajo or TCC settings fixes it — a restart does.
+    @Published var automationDenied = false
+    @Published var restarting = false
+    private var positionBase: Double = 0     // last real position we were told…
+    private var positionAt = Date.distantPast  // …and when; the 1.5 s timer extrapolates from these
 
     private var timer: Timer?
     private var artURL: String?
@@ -54,19 +64,42 @@ final class NowPlayingModel: ObservableObject {
         album = info["Album"] as? String ?? ""
         let durMs = (info["Duration"] as? NSNumber)?.doubleValue ?? 0
         let pos = (info["Playback Position"] as? NSNumber)?.doubleValue ?? 0
-        progress = durMs > 0 ? min(1, max(0, pos / (durMs / 1000))) : 0
+        setPosition(pos, duration: durMs / 1000)
     }
 
+    /// Record a real position and re-derive progress. `tick()` moves it forward between reports.
+    private func setPosition(_ pos: Double, duration: Double) {
+        positionBase = pos; positionAt = Date()
+        durationSec = duration
+        positionSec = pos
+        progress = duration > 0 ? min(1, max(0, pos / duration)) : 0
+    }
+
+    /// Spotify's notification only fires on track/state changes, and a denied AppleScript reports
+    /// nothing — so advance the clock locally while playing, or the bar sits frozen.
+    private func tick() {
+        guard isPlaying, durationSec > 0, positionAt != .distantPast else { return }
+        let pos = min(durationSec, positionBase + Date().timeIntervalSince(positionAt))
+        positionSec = pos
+        progress = pos / durationSec
+    }
+
+    // The `try` matters: without it osascript exits 1 with the -1743 text on stderr, which
+    // shell() discards, and Kajo can't tell "denied" from "Spotify quit". This returns ERR<code>.
     private let infoScript = """
     set out to ""
-    if application "Spotify" is running then
-    \ttell application "Spotify"
-    \t\tset ps to player state as string
-    \t\tif ps is not "stopped" then
-    \t\t\tset out to ps & linefeed & (name of current track) & linefeed & (artist of current track) & linefeed & (album of current track) & linefeed & (artwork url of current track) & linefeed & ((duration of current track) as text) & linefeed & ((player position) as text)
-    \t\tend if
-    \tend tell
-    end if
+    try
+    \tif application "Spotify" is running then
+    \t\ttell application "Spotify"
+    \t\t\tset ps to player state as string
+    \t\t\tif ps is not "stopped" then
+    \t\t\t\tset out to ps & linefeed & (name of current track) & linefeed & (artist of current track) & linefeed & (album of current track) & linefeed & (artwork url of current track) & linefeed & ((duration of current track) as text) & linefeed & ((player position) as text)
+    \t\t\tend if
+    \t\tend tell
+    \tend if
+    on error errMsg number errNum
+    \treturn "ERR" & errNum
+    end try
     return out
     """
 
@@ -91,12 +124,25 @@ final class NowPlayingModel: ObservableObject {
         }
     }
 
+    private static let spotifyID = "com.spotify.client"
+    private var spotifyRunning: Bool {
+        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == Self.spotifyID }
+    }
+
     private func apply(_ lines: [String]) {
+        if let first = lines.first, first.hasPrefix("ERR") {
+            // -1743 = "Not authorised to send Apple events". Only meaningful while Spotify is up.
+            automationDenied = first == "ERR-1743" && spotifyRunning
+            tick()
+            return
+        }
+        automationDenied = false
         guard lines.count >= 7, !lines[0].isEmpty else {
             // AppleScript gave nothing. If Spotify's notification is feeding us, don't wipe its state.
-            if lastNotification != nil, NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == "com.spotify.client" }) { return }
+            if lastNotification != nil, spotifyRunning { tick(); return }
             hasTrack = false; isPlaying = false
-            title = ""; artist = ""; album = ""; artwork = nil; artURL = nil; progress = 0
+            title = ""; artist = ""; album = ""; artwork = nil; artURL = nil
+            setPosition(0, duration: 0)
             return
         }
         hasTrack = true
@@ -104,8 +150,29 @@ final class NowPlayingModel: ObservableObject {
         title = lines[1]; artist = lines[2]; album = lines[3]
         let durMs = Double(lines[5]) ?? 0
         let pos = Double(lines[6].replacingOccurrences(of: ",", with: ".")) ?? 0
-        progress = durMs > 0 ? min(1, max(0, pos / (durMs / 1000))) : 0
+        setPosition(pos, duration: durMs / 1000)
         if lines[4] != artURL { artURL = lines[4]; loadArtwork(lines[4]) }
+    }
+
+    /// Quit Spotify and launch it again. Spotify does not resume playback by itself afterwards.
+    func restartSpotify() {
+        guard !restarting else { return }
+        restarting = true
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: Self.spotifyID)
+        apps.forEach { _ = $0.terminate() }
+        var waited = 0
+        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] t in
+            waited += 1
+            guard let self else { t.invalidate(); return }
+            if !self.spotifyRunning || waited > 40 {       // up to ~12 s, then give up waiting
+                t.invalidate()
+                if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.spotifyID) {
+                    NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { _, _ in
+                        DispatchQueue.main.async { self.restarting = false; self.refresh() }
+                    }
+                } else { self.restarting = false }
+            }
+        }
     }
 
     /// Cover art without Automation rights: Apple's public iTunes Search API (no key). Upscales the
@@ -192,7 +259,8 @@ struct MusicTab: View {
                     Text(model.album).font(.caption).foregroundStyle(Gruv.gray).lineLimit(1)
                 }
                 progressBar
-                controls
+                timeRow
+                if model.automationDenied { deniedNotice } else { controls }
                 openSpotifyButton
                 Spacer()
             }
@@ -246,6 +314,43 @@ struct MusicTab: View {
             }
         }
         .frame(height: 4)
+    }
+
+    private var timeRow: some View {
+        HStack {
+            Text(mmss(model.positionSec))
+            Spacer()
+            Text(mmss(model.durationSec))
+        }
+        .font(.caption.monospacedDigit())
+        .foregroundStyle(Gruv.gray)
+        .padding(.top, -6)
+    }
+
+    private func mmss(_ s: Double) -> String {
+        let t = Int(s.rounded(.down))
+        return String(format: "%d:%02d", t / 60, t % 60)
+    }
+
+    /// Shown instead of the controls while AppleEvents to Spotify are refused (see automationDenied).
+    private var deniedNotice: some View {
+        VStack(spacing: 8) {
+            Text("Spotify updated itself in place, so macOS refuses control commands until it restarts.")
+                .font(.caption).foregroundStyle(Gruv.fg2).multilineTextAlignment(.center)
+            Button { model.restartSpotify() } label: {
+                HStack(spacing: 6) {
+                    if model.restarting { ProgressView().controlSize(.small) }
+                    Text(model.restarting ? "Restarting…" : "Restart Spotify")
+                }
+                .font(.callout.weight(.medium))
+                .foregroundStyle(Gruv.yellow)
+                .padding(.vertical, 7).padding(.horizontal, 16)
+                .background(RoundedRectangle(cornerRadius: 9).fill(Gruv.yellow.opacity(0.15)))
+            }
+            .buttonStyle(.plain)
+            .disabled(model.restarting)
+        }
+        .padding(.top, 2)
     }
 
     private var controls: some View {
