@@ -125,6 +125,8 @@ open "kajo://config"            # or the menu-bar Settings… item
 
 ## Status
 
+v0.28.2 — Pi tab shows an **estimated power draw** pill when the health endpoint returns `host.power_w`. A Raspberry Pi 4 has no power sensor (the PMIC ADC behind `vcgencmd pmic_read_adc` is Pi 5 only), so the health container interpolates watts from CPU load between `POWER_IDLE_W` and `POWER_MAX_W` — env-tunable, so a plug meter can calibrate them. Rendered as `~4.6 W`, tilde included, so it never reads as a measurement.
+
 v0.28.1 — Hours tab **auto-focuses the task field** when it opens (panel show or tab switch), so you can type straight away — skipped while a timer is running, which never steals focus mid-work.
 
 v0.28 — **OpenVPN toggle** in the VPN tab, same switch as Tailscale: it drives the `vpn` CLI (dotfiles/bin) which talks to a root openvpn LaunchDaemon over its management socket — no sudo from the app, SAML/WEB_AUTH logins pop up in the browser and the row spins until the tunnel is up. Profile via `vpn.json` (`{ "profile": "weare" }`). Replaces the launch-OpenVPN-Connect row.
