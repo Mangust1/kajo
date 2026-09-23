@@ -37,6 +37,7 @@ struct PiStatus: Codable, Equatable {
     var diskTotalGB = 0.0
     var diskPercent = 0.0
     var tempC: Double? = nil
+    var powerW: Double? = nil      // estimated, not measured — Pi 4 has no sensor
     var load: [Double] = []
     var containers: [PiContainer] = []
 }
@@ -148,6 +149,7 @@ final class PiModel: ObservableObject {
             s.cpuPercent = host["cpu_percent"] as? Double ?? 0
             s.cpuCount = host["cpu_count"] as? Int ?? 0
             s.tempC = host["temp_c"] as? Double
+            s.powerW = host["power_w"] as? Double
             s.load = (host["load"] as? [Double]) ?? []
             if let m = host["mem"] as? [String: Any] {
                 s.memUsedMB = m["used_mb"] as? Int ?? 0
@@ -260,6 +262,10 @@ struct PiTab: View {
             HStack(spacing: 14) {
                 if let t = s.tempC {
                     pill("thermometer.medium", String(format: "%.0f°C", t), tempColor(t))
+                }
+                if let w = s.powerW {
+                    // "~" because this is interpolated from CPU load, not metered.
+                    pill("bolt.fill", String(format: "~%.1f W", w), Gruv.yellow)
                 }
                 if !s.load.isEmpty {
                     pill("gauge.with.dots.needle.50percent",
