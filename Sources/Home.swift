@@ -25,6 +25,26 @@ struct HAEntity: Identifiable {
     var targetTemp: Double?   // climate setpoint (attr "temperature"), not the measured temp
 }
 
+// Reads the leaf certificate's not-after date on every server-trust challenge so the
+// tab can warn before expiry. Observation only: trust evaluation is left to the system.
+final class CertWatcher: NSObject, URLSessionDelegate {
+    var onExpiry: ((Date) -> Void)?
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           let trust = challenge.protectionSpace.serverTrust,
+           let leaf = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first,
+           let values = SecCertificateCopyValues(leaf, [kSecOIDX509V1ValidityNotAfter] as CFArray, nil) as? [String: Any],
+           let entry = values[kSecOIDX509V1ValidityNotAfter as String] as? [String: Any],
+           let abs = (entry[kSecPropertyKeyValue as String] as? NSNumber)?.doubleValue {
+            let date = Date(timeIntervalSinceReferenceDate: abs)
+            DispatchQueue.main.async { [weak self] in self?.onExpiry?(date) }
+        }
+        completionHandler(.performDefaultHandling, nil)
+    }
+}
+
 // TLS is validated normally: HA sits behind a real (Let's Encrypt) certificate, and
 // this session carries the bearer token that can unlock the front door.
 final class HAModel: ObservableObject {
@@ -33,17 +53,20 @@ final class HAModel: ObservableObject {
     @Published var configured = false
     @Published var reachable = false
     @Published var busy: Set<String> = []
+    @Published var certExpires: Date?
 
     private var url = "", token = ""
     private var wanted: [String] = []
     private let session: URLSession
+    private let certWatcher = CertWatcher()
     private var timer: Timer?
     private var inFlight = false
 
     init() {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 6
-        session = URLSession(configuration: cfg)
+        session = URLSession(configuration: cfg, delegate: certWatcher, delegateQueue: nil)
+        certWatcher.onExpiry = { [weak self] in self?.certExpires = $0 }
         loadConfig()
     }
 
@@ -230,6 +253,36 @@ struct HATab: View {
     @ObservedObject var model: HAModel
 
     var body: some View {
+        // The notice sits above every state: an expired cert fails the TLS handshake,
+        // so it has to show next to the "unreachable" hint too.
+        VStack(alignment: .leading, spacing: 8) {
+            certNotice
+            content
+        }
+    }
+
+    @ViewBuilder private var certNotice: some View {
+        if let exp = model.certExpires {
+            let days = Calendar.current.dateComponents([.day], from: Date(), to: exp).day ?? 0
+            let expired = exp < Date()
+            if expired || days < 14 {
+                let f = DateFormatter()
+                let _ = f.dateFormat = "d MMM"
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.trianglebadge.exclamationmark").frame(width: 20)
+                    Text(expired ? "HA certificate expired \(f.string(from: exp)) — renew on the Pi (Caddy)"
+                                 : "HA certificate expires in \(days) days (\(f.string(from: exp)))")
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .font(.callout)
+                .foregroundStyle(expired ? Gruv.red : Gruv.yellow)
+                .padding(.vertical, 5)
+            }
+        }
+    }
+
+    @ViewBuilder private var content: some View {
         if !model.configured {
             hint("No HA config", "Add ~/.config/kajo/ha.json")
         } else if !model.reachable && model.lights.isEmpty && model.sensors.isEmpty {

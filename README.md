@@ -125,6 +125,8 @@ open "kajo://config"            # or the menu-bar Settings… item
 
 ## Status
 
+v0.28.4 — Smart Home tab warns when the Home Assistant TLS certificate expires within 14 days.
+
 v0.28.3 — Now Playing: **elapsed / total time row**, and position is extrapolated between reports so the bar keeps moving in notification-only mode. When AppleEvents to Spotify are refused while it's running (Spotify updated itself in place → tccd "unable to create attribution chain" → `-1743` for every client), the AppleScript now returns `ERR-1743` instead of dying on stderr, and the tab swaps the dead controls for a **Restart Spotify** button.
 
 v0.28.2 — Pi tab shows an **estimated power draw** pill when the health endpoint returns `host.power_w`. A Raspberry Pi 4 has no power sensor (the PMIC ADC behind `vcgencmd pmic_read_adc` is Pi 5 only), so the health container interpolates watts from CPU load between `POWER_IDLE_W` and `POWER_MAX_W` — env-tunable, so a plug meter can calibrate them. Rendered as `~4.6 W`, tilde included, so it never reads as a measurement.
