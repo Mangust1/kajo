@@ -363,7 +363,7 @@ final class TerminalWindowController: NSObject, LocalProcessTerminalViewDelegate
             ?? NSFont.monospacedSystemFont(ofSize: config.fontSize, weight: .regular)
         t.baseFontSize = config.fontSize
         t.nativeBackgroundColor = Gruv.termBg
-        t.nativeForegroundColor = NSColor(hex: 0xebdbb2)
+        t.nativeForegroundColor = NSColor(hex: 0xfbf1c7)
         t.caretColor = NSColor(hex: 0xbdae93)
         t.caretTextColor = Gruv.termBg
         t.selectedTextBackgroundColor = NSColor(hex: 0xd65d0e)
@@ -398,7 +398,7 @@ extension Gruv {
     static let borderActive = NSColor(hex: 0xd65d0e)   // gruvbox orange, same as the old JankyBorders frame
     static let borderIdle = NSColor(hex: 0x3c3836)     // bg1
     static let terminalPalette: [SwiftTerm.Color] = [
-        0x3c3836, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,   // normal
+        0x3c3836, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xd5c4a1,   // normal (color 7 = fg2, not gray — Claude Code body text)
         0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xfbf1c7,   // bright
     ].map { SwiftTerm.Color(hex: $0) }
 }
