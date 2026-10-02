@@ -85,6 +85,16 @@ final class KajoTerminalView: LocalProcessTerminalView {
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    /// Display scale changed (HiDPI ↔ non-HiDPI mode, moving to another screen). SwiftTerm snaps the
+    /// cell width to the pixel grid using the backing scale at compute time and never recomputes it,
+    /// so text and tmux's box-drawing borders end up with different cell widths and the borders drift
+    /// across the panes. Re-setting the font runs resetFont() → fresh cell dimensions + renderer state.
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        let f = font
+        font = f
+    }
+
     override func paste(_ sender: Any) {
         let pb = NSPasteboard.general
         let hasText = (pb.string(forType: .string) ?? "").isEmpty == false
