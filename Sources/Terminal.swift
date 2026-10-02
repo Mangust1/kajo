@@ -91,6 +91,15 @@ final class KajoTerminalView: LocalProcessTerminalView {
     /// across the panes. Re-setting the font runs resetFont() → fresh cell dimensions + renderer state.
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
+        refreshCellMetrics()
+    }
+    /// The first cell size is computed against NSScreen.main before the view has a window; redo it
+    /// once the real window (and its screen's scale) is known.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { refreshCellMetrics() }
+    }
+    private func refreshCellMetrics() {
         let f = font
         font = f
     }
