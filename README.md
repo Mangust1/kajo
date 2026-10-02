@@ -125,6 +125,8 @@ open "kajo://config"            # or the menu-bar Settings… item
 
 ## Status
 
+v0.28.6 — Hours: Severa totals round each task up separately (repeated/nested sessions of one task summed first), not the whole day.
+
 v0.28.5 — Terminal: tmux pane borders no longer drift after a HiDPI switch or a move to a screen with a different scale (SwiftTerm's cell width is recomputed on backing-scale changes).
 
 v0.28.4 — Smart Home tab warns when the Home Assistant TLS certificate expires within 14 days.

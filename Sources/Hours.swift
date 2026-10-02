@@ -267,7 +267,13 @@ final class HoursModel: ObservableObject {
         }
         return order.compactMap { k -> WorkHourPost? in
             let items = bucket[k]!
-            let hours = ceilToMinutes(items.reduce(0) { $0 + $1.seconds } / 3600, roundMinutes)
+            // Round per TASK, not per bucket: every distinct task (all its sessions / nested re-runs
+            // summed first) is rounded up on its own, then the rounded tasks are added together.
+            // Two 20-min tasks → 0.5 h + 0.5 h = 1.0 h, not ceil(40 min) = 0.5 h.
+            let byTask = Dictionary(grouping: items) { $0.task.trimmingCharacters(in: .whitespaces).lowercased() }
+            let hours = (byTask.values.reduce(0.0) { acc, sessions in
+                acc + ceilToMinutes(sessions.reduce(0) { $0 + $1.seconds } / 3600, roundMinutes)
+            } * 10000).rounded() / 10000
             var seen = Set<String>(); var descs: [String] = []
             for e in items.sorted(by: { $0.start < $1.start }) {
                 let t = e.task.trimmingCharacters(in: .whitespaces)
