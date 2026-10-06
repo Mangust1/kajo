@@ -116,6 +116,7 @@ open -g "kajo://terminal"       # toggle the drop-down terminal (pinned to its S
 
 # 3. configure (optional) — GUI editor for ~/.config/kajo/*.json
 open "kajo://config"            # or the menu-bar Settings… item
+open "kajo://scratch"           # toggle the always-on-top scratch notepad (~/.config/kajo/scratch.txt)
 ```
 
 - **Signing:** the Makefile signs with `SIGN_ID := Kajo Self-Signed`. Create your own cert by that name, or set `SIGN_ID := -` for ad-hoc signing.
@@ -124,6 +125,8 @@ open "kajo://config"            # or the menu-bar Settings… item
 - **Optional configs:** `~/.config/kajo/{unifi,ha,pi}.json` (mode 600). Absent = that tab shows "No config".
 
 ## Status
+
+v0.29.0 — **Scratch notepad** (`kajo://scratch`): a small always-on-top plain-text window, solid gruvbox, monospace; toggles open/hidden, remembers its frame, autosaves to `~/.config/kajo/scratch.txt` (0.5 s after edits, on hide and on quit).
 
 v0.28.7 — Hours: the separate all-entries window has a solid gruvbox background instead of the see-through blur.
 

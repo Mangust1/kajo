@@ -112,6 +112,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelega
             ConfigWindowController.shared.show()
             return
         }
+        if url.host == "scratch" {   // kajo://scratch — toggle the scratch notepad (Scratch.swift)
+            ScratchWindowController.shared.toggle()
+            return
+        }
         // Accept both  kajo://tab/calendar  and  kajo://calendar
         let raw = (url.host == "tab" ? url.pathComponents.last : url.host) ?? ""
         let name = raw.lowercased()
