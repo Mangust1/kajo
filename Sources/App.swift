@@ -13,6 +13,28 @@ import UniformTypeIdentifiers
 import ApplicationServices   // Accessibility API (AXUIElement) for quake window control
 import QuartzCore            // CADisplayLink — vsync-synced panel animation
 
+// MARK: - Menus
+
+/// Agent apps have no menu bar, but a main menu is still what makes ⌘C/⌘V/⌘A work in text views.
+/// Kajo Viewer.app (a regular app) also wants ⌘Q, hence `quit`.
+func installMainMenu(quit: Bool) {
+    let main = NSMenu()
+    if quit {
+        let appItem = NSMenuItem(); let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Quit Kajo Viewer", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu; main.addItem(appItem)
+    }
+    let editItem = NSMenuItem()
+    let edit = NSMenu(title: "Edit")
+    edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    editItem.submenu = edit
+    main.addItem(editItem)
+    NSApp.mainMenu = main
+}
+
 // MARK: - App delegate (URL scheme entry point)
 
 final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelegate {
@@ -74,24 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelega
     /// Agent apps have no menu bar, so ⌘C/⌘V/⌘X/⌘A never reach the responder chain unless an
     /// Edit menu declares the key equivalents. Needed by the terminal window (paste, incl.
     /// clipboard images) and it also fixes paste into the panel's text fields.
-    private func installEditMenu() {
-        let main = NSMenu()
-        let editItem = NSMenuItem()
-        let edit = NSMenu(title: "Edit")
-        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editItem.submenu = edit
-        main.addItem(editItem)
-        NSApp.mainMenu = main
-    }
-
-    // "Open with… Kajo" for plain-text files (CFBundleDocumentTypes). kajo:// URLs still go through
-    // the kAEGetURL handler above, which takes precedence; the isFileURL filter is belt and braces.
-    func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls where url.isFileURL { TextViewerWindowController.open(url) }
-    }
+    private func installEditMenu() { installMainMenu(quit: false) }
 
     @objc func handleURLEvent(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
         guard let str = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,

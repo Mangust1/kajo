@@ -17,7 +17,7 @@ private final class ScratchWindow: NSWindow {
 }
 
 /// Shared look for Scratch and the file viewer: floating, solid gruvbox bg0, monospaced plain text.
-func makeNotepadWindow(title: String, size: NSSize) -> (NSWindow, NSTextView) {
+func makeNotepadWindow(title: String, size: NSSize, floating: Bool = true) -> (NSWindow, NSTextView) {
     let w = ScratchWindow(contentRect: NSRect(origin: .zero, size: size),
                           styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     w.title = title
@@ -25,7 +25,7 @@ func makeNotepadWindow(title: String, size: NSSize) -> (NSWindow, NSTextView) {
     w.isReleasedWhenClosed = false
     w.hidesOnDeactivate = false
     w.appearance = NSAppearance(named: .darkAqua)
-    w.level = .floating
+    if floating { w.level = .floating }
     // Solid gruvbox bg0, same as the Hours window (no blur).
     w.isOpaque = true
     w.backgroundColor = NSColor(Gruv.bg0)
@@ -110,8 +110,10 @@ final class ScratchWindowController: NSObject, NSWindowDelegate, NSTextViewDeleg
     }
 }
 
-// Text file viewer: Kajo is an "Open with…" target for plain text (CFBundleDocumentTypes in
-// Info.plist). Each file gets its own Scratch-looking window; editable for trimming/annotating,
+// Text file viewer, shipped as its own bundle "Kajo Viewer.app" (Info-Viewer.plist, built by the
+// Makefile from the same binary; main.swift branches on the bundle id). A separate regular app so
+// Cmd+Tab and AltTab list it while Kajo itself stays hidden — AltTab blacklists per bundle id.
+// Each file gets its own Scratch-looking window; editable for trimming/annotating,
 // but never saved anywhere. (ponytail: whole file read into memory, no size cap — upgrade path
 // would be a size check + truncation notice for huge logs.)
 final class TextViewerWindowController: NSObject, NSWindowDelegate {
@@ -128,7 +130,8 @@ final class TextViewerWindowController: NSObject, NSWindowDelegate {
             .replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[ -/]*[@-~]", with: "", options: .regularExpression)
             .replacingOccurrences(of: "\u{1B}", with: "")
 
-        let (w, tv) = makeNotepadWindow(title: url.lastPathComponent, size: NSSize(width: 700, height: 500))
+        // Normal level: Cmd+Tab / AltTab list it like any document window.
+        let (w, tv) = makeNotepadWindow(title: url.lastPathComponent, size: NSSize(width: 700, height: 500), floating: false)
         tv.string = text
         // Frame name shared by every viewer window: size is remembered, new ones stack on top.
         if !w.setFrameUsingName("TextViewer") { w.center() }
@@ -146,4 +149,21 @@ final class TextViewerWindowController: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         Self.live.removeAll { $0 === self }
     }
+}
+
+final class ViewerAppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.isFileURL { TextViewerWindowController.open(url) }
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+}
+
+/// Entry point of Kajo Viewer.app (see main.swift). Never returns.
+func runViewerApp() -> Never {
+    let app = NSApplication.shared
+    let delegate = ViewerAppDelegate()   // run() never returns, so this local keeps the weak NSApp.delegate alive
+    app.delegate = delegate
+    installMainMenu(quit: true)
+    app.run()
+    exit(0)
 }

@@ -5,14 +5,25 @@ PLIST    := $(BUNDLE)/Contents/Info.plist
 LSREG    := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 SIGN_ID  ?= Kajo Self-Signed
 DEV_APP  := Kajo Dev.app
+VIEWER   := Kajo Viewer.app
+VERSION  := $(shell /usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Info.plist)
 
-.PHONY: build run install reload dev check clean distclean
+.PHONY: build viewer run install reload dev check clean distclean
 
 # Sign every build with a stable self-signed identity so macOS TCC grants
 # (Spotify automation, Bluetooth, Location) persist across rebuilds.
-build: $(EXEC) $(PLIST)
+build: $(EXEC) $(PLIST) viewer
 	@mkdir -p $(BUNDLE)/Contents/Resources && cp assets/Kajo.icns $(BUNDLE)/Contents/Resources/Kajo.icns
 	@codesign --force --sign "$(SIGN_ID)" $(BUNDLE) && echo "[codesign] $(BUNDLE) signed with '$(SIGN_ID)'"
+
+# Kajo Viewer.app: the same binary in a second bundle (Info-Viewer.plist, own bundle id) — the
+# "Open with…" target for text files. Separate app so Cmd+Tab/AltTab list it while Kajo stays hidden.
+viewer: $(EXEC)
+	@mkdir -p "$(VIEWER)/Contents/MacOS" "$(VIEWER)/Contents/Resources"
+	@cp $(EXEC) "$(VIEWER)/Contents/MacOS/Kajo Viewer"
+	@cp assets/Kajo.icns "$(VIEWER)/Contents/Resources/Kajo.icns"
+	@sed 's#@VERSION@#$(VERSION)#' Info-Viewer.plist > "$(VIEWER)/Contents/Info.plist"
+	@codesign --force --sign "$(SIGN_ID)" "$(VIEWER)" && echo "[codesign] $(VIEWER) signed"
 
 # Build via SwiftPM (Package.swift): deployment target = platforms .macOS(.v14), language
 # mode = Swift 5 (swiftLanguageVersions). SwiftTerm (terminal window) is the only dependency;
@@ -45,9 +56,11 @@ reload: run
 # Replace the bundle whole (cp -R over a running app swaps the Mach-O under it →
 # "Code Signature Invalid"), then relaunch so you're actually running the new build.
 install: build
-	@rm -rf /Applications/$(BUNDLE)
-	@cp -R $(BUNDLE) /Applications/
+	@rm -rf /Applications/$(BUNDLE) "/Applications/$(VIEWER)"
+	@cp -R $(BUNDLE) "$(VIEWER)" /Applications/
 	@$(LSREG) -f /Applications/$(BUNDLE) 2>/dev/null || true
+	@$(LSREG) -f "/Applications/$(VIEWER)" 2>/dev/null || true
+	@killall "Kajo Viewer" 2>/dev/null || true
 	@killall $(APP) 2>/dev/null || true
 	@open /Applications/$(BUNDLE)
 	@echo "Installed + relaunched /Applications/$(BUNDLE)"
@@ -75,7 +88,7 @@ check:
 	@.build/debug/Kajo --clean-url "https://example.com/?utm_source=x" >/dev/null && echo "check OK"
 
 clean:
-	@rm -rf $(BUNDLE) "$(DEV_APP)" .check
+	@rm -rf $(BUNDLE) "$(DEV_APP)" "$(VIEWER)" .check
 	@echo "cleaned (SwiftPM cache in .build/ kept; \`make distclean\` removes it)"
 
 distclean: clean

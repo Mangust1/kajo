@@ -26,6 +26,9 @@ if let i = CommandLine.arguments.firstIndex(of: "--clean-url"), i + 1 < CommandL
     exit(0)
 }
 
+// Same binary, second bundle: "Kajo Viewer.app" (Makefile `viewer`) is a plain document viewer, see Scratch.swift.
+if Bundle.main.bundleIdentifier == "fi.mangusti.kajo.viewer" { runViewerApp() }
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
