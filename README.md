@@ -125,6 +125,8 @@ open "kajo://config"            # or the menu-bar Settings… item
 
 ## Status
 
+v0.28.7 — Hours: the separate all-entries window has a solid gruvbox background instead of the see-through blur.
+
 v0.28.6 — Hours: Severa totals round each task up separately (repeated/nested sessions of one task summed first), not the whole day.
 
 v0.28.5 — Terminal: tmux pane borders no longer drift after a HiDPI switch or a move to a screen with a different scale (SwiftTerm's cell width is recomputed on backing-scale changes).

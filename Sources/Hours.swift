@@ -784,16 +784,10 @@ final class HoursWindowController {
         w.isReleasedWhenClosed = false
         w.appearance = NSAppearance(named: .darkAqua)
         w.level = .floating                          // stay above the browser while filling Severa
-        let visual = NSVisualEffectView()
-        visual.material = .hudWindow
-        visual.blendingMode = .behindWindow
-        visual.state = .active
-        visual.appearance = NSAppearance(named: .darkAqua)
-        w.contentView = visual
-        let hosting = NSHostingView(rootView: HoursWindow(model: model))
-        hosting.frame = visual.bounds
-        hosting.autoresizingMask = [.width, .height]
-        visual.addSubview(hosting)
+        // Solid gruvbox bg0, no blur: the long task list is hard to read over a busy window behind it.
+        w.isOpaque = true
+        w.backgroundColor = NSColor(Gruv.bg0)
+        w.contentView = NSHostingView(rootView: HoursWindow(model: model))
         w.center()
         window = w
         w.makeKeyAndOrderFront(nil)
