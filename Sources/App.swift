@@ -87,6 +87,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, CBCentralManagerDelega
         NSApp.mainMenu = main
     }
 
+    // "Open with… Kajo" for plain-text files (CFBundleDocumentTypes). kajo:// URLs still go through
+    // the kAEGetURL handler above, which takes precedence; the isFileURL filter is belt and braces.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.isFileURL { TextViewerWindowController.open(url) }
+    }
+
     @objc func handleURLEvent(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
         guard let str = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
               let url = URL(string: str) else { return }

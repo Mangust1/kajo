@@ -126,6 +126,8 @@ open "kajo://scratch"           # toggle the always-on-top scratch notepad (~/.c
 
 ## Status
 
+v0.30.0 — **Text file viewer**: opens plain-text files (Open with… from a browser or Finder) in a floating viewer, ANSI codes stripped; one window per file, same look as Scratch, editable but never saved.
+
 v0.29.0 — **Scratch notepad** (`kajo://scratch`): a small always-on-top plain-text window, solid gruvbox, monospace; toggles open/hidden, remembers its frame, autosaves to `~/.config/kajo/scratch.txt` (0.5 s after edits, on hide and on quit).
 
 v0.28.7 — Hours: the separate all-entries window has a solid gruvbox background instead of the see-through blur.
