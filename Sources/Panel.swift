@@ -137,25 +137,39 @@ struct RailIcon: View {
 // MARK: - Notch geometry
 
 /// Where the hardware notch sits on a screen, in global screen coordinates. A notchless screen
-/// gets a virtual 160pt-wide, zero-height notch at the top centre (the island grows from the edge).
+/// gets a virtual notch: a 12pt gap at the top centre, menu bar height − 4, 2pt below the screen top,
+/// so the island floats inside the bar as a pill. notchRect.maxY is the island's top in both cases.
 struct NotchGeometry {
     let notchRect: NSRect
-    var hasNotch: Bool { notchRect.height > 0 }
+    let isVirtual: Bool
+    private let screenTop: CGFloat
+    var hasNotch: Bool { !isVirtual }
     var neck: CGFloat { notchRect.height }
+    static let virtualGap: CGFloat = 12           // no hardware to flank: the ears sit almost together
+    static let virtualInset: CGFloat = 2
 
     init(screen: NSScreen) {
         let f = screen.frame
+        screenTop = f.maxY
         if let l = screen.auxiliaryTopLeftArea, let r = screen.auxiliaryTopRightArea, screen.safeAreaInsets.top > 0 {
             let h = screen.safeAreaInsets.top
             notchRect = NSRect(x: f.minX + l.width, y: f.maxY - h, width: f.width - l.width - r.width, height: h)
+            isVirtual = false
         } else {
-            notchRect = NSRect(x: f.midX - 80, y: f.maxY, width: 160, height: 0)
+            // Bar height: the system menu bar, or SketchyBar's 32 when the system bar auto-hides (then
+            // visibleFrame reaches the top). The ears need ~26pt, so never go below 32 − 4.
+            let bar = max(f.maxY - screen.visibleFrame.maxY, 32)
+            let h = bar - 4
+            let w = Self.virtualGap
+            notchRect = NSRect(x: f.midX - w / 2, y: f.maxY - Self.virtualInset - h, width: w, height: h)
+            isVirtual = true
         }
     }
 
-    /// The collapsed window = the hover target: the notch itself, or a 10pt strip on a notchless screen.
+    /// The collapsed window when no ears show = the hover target: the notch itself, or a 10pt strip
+    /// at the very top of a notchless screen (the pill is hidden then).
     var collapsedRect: NSRect {
-        hasNotch ? notchRect : NSRect(x: notchRect.minX, y: notchRect.maxY - 10, width: notchRect.width, height: 10)
+        hasNotch ? notchRect : NSRect(x: notchRect.midX - 80, y: screenTop - 10, width: 160, height: 10)
     }
 }
 
@@ -167,6 +181,7 @@ final class NotchModel: ObservableObject {
     @Published var phase: NotchPhase = .collapsed
     @Published var notchWidth: CGFloat = 160
     @Published var neck: CGFloat = 0
+    @Published var virtual = false                // notchless home: the island is a pill inside the menu bar
     @Published var hoverStrip = false             // notchless + hover on: faint fill so the strip catches the mouse
     @Published var leftEar: CGFloat = 0           // applied ear widths (content + 12pt padding), 0 = hidden;
     @Published var rightEar: CGFloat = 0          // the controller sets them after sizing the window
@@ -178,32 +193,37 @@ final class NotchModel: ObservableObject {
     static let peekCell: CGFloat = 32             // RailIcon at 0.8 scale, so 14+ tabs fit a peek row
     let peekTabs = Tab.allCases.filter { enabledModules.contains($0) }
 
-    var flared: Bool { neck > 0 }                 // concave top corners only when fusing with a real notch
-    var earsAllowed: Bool { islandEars && flared }
+    var flared: Bool { neck > 0 && !virtual }     // concave top corners only when fusing with a real notch
+    var earsAllowed: Bool { islandEars && neck > 0 }
+    static let minPill: CGFloat = 160             // virtual notch: narrowest visible pill
     var hasEars: Bool { leftEar > 0 || rightEar > 0 }
     static let earFlare: CGFloat = 8
     static let earCap: CGFloat = 230              // ear content is width-capped; the open window reserves this much
     /// How far the collapsed island reaches past the notch on its wider side (window = notch ± span).
     static func earSpan(_ l: CGFloat, _ r: CGFloat) -> CGFloat { l > 0 || r > 0 ? max(l, r) + earFlare : 0 }
     var earSpan: CGFloat { Self.earSpan(leftEar, rightEar) }
+    /// Extra half-width the collapsed window needs for the 160pt minimum pill (virtual notch only).
+    var pillPad: CGFloat { virtual ? (Self.minPill - notchWidth) / 2 : 0 }
     /// Ears can be uneven: the collapsed shape shifts so its notch gap stays on the hardware notch.
     func shapeOffset(_ p: NotchPhase) -> CGFloat { p == .collapsed ? (rightEar - leftEar) / 2 : 0 }
 
     func topRadius(_ p: NotchPhase) -> CGFloat {
         switch p {
-        case .collapsed: return hasEars ? Self.earFlare : 0
+        case .collapsed: return virtual ? neck / 2 : hasEars ? Self.earFlare : 0
         case .peek:      return flared ? 8 : 12
         case .expanded:  return flared ? 10 : 18
         }
     }
     func bottomRadius(_ p: NotchPhase) -> CGFloat {
-        switch p { case .collapsed: return 8; case .peek: return 12; case .expanded: return 18 }
+        switch p { case .collapsed: return virtual ? neck / 2 : 8; case .peek: return 12; case .expanded: return 18 }
     }
     /// Full shape size; with a flare the shape is 2×topRadius wider than its body.
     func shapeSize(_ p: NotchPhase) -> CGSize {
         let flare = flared ? 2 * topRadius(p) : 0
         switch p {
-        case .collapsed: return CGSize(width: notchWidth + leftEar + rightEar + flare, height: neck)
+        case .collapsed:
+            if virtual { return CGSize(width: hasEars ? max(Self.minPill, notchWidth + leftEar + rightEar) : 0, height: neck) }   // no ears: no pill
+            return CGSize(width: notchWidth + leftEar + rightEar + flare, height: neck)
         case .peek:
             let row = CGFloat(peekTabs.count) * Self.peekCell + 24
             let island = notchWidth + 2 * max(leftEar, rightEar) + flare   // ears stay inside the neck band
@@ -313,6 +333,7 @@ struct NotchRoot: View {
             }
             ears.offset(x: (notch.rightEar - notch.leftEar) / 2 - offset)   // notch gap on the hardware notch in every phase
         }
+        .opacity(notch.virtual && phase == .collapsed && !notch.hasEars ? 0 : 1)   // virtual pill fades with its last ear
         .frame(width: size.width, height: size.height, alignment: .top)
         .clipShape(shape)
         .overlay(
@@ -322,7 +343,7 @@ struct NotchRoot: View {
         .shadow(color: .black.opacity(phase == .collapsed ? 0 : 0.55), radius: 22, y: 10)   // drawn here: a window shadow would halo the collapsed notch
         .offset(x: offset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Color.black.opacity(notch.hoverStrip && phase == .collapsed ? 0.01 : 0))  // fully clear pixels don't receive the mouse
+        .background(Color.black.opacity(notch.hoverStrip && phase == .collapsed && !notch.hasEars ? 0.01 : 0))  // fully clear pixels don't receive the mouse
         .ignoresSafeArea()                                            // the window covers the notch: no safe-area push-down
     }
 
@@ -667,9 +688,10 @@ final class PanelController {
 
     // MARK: geometry
 
-    /// Collapsed home: the first screen with a notch, else the main screen.
+    /// Collapsed home: the primary display (menu bar origin); notchless → virtual notch there.
+    /// One island only, so a MacBook's real notch stays bare while an external is primary.
     private func homeScreen() -> NSScreen? {
-        NSScreen.screens.first { NotchGeometry(screen: $0).hasNotch } ?? NSScreen.main ?? NSScreen.screens.first
+        NSScreen.screens.first ?? NSScreen.main
     }
 
     /// Screen under the mouse = the SketchyBar you clicked. NSScreen.main is the screen of
@@ -684,31 +706,35 @@ final class PanelController {
         let g = NotchGeometry(screen: s)
         screen = s; geo = g
         notch.neck = g.neck
+        notch.virtual = g.isVirtual
         notch.notchWidth = g.notchRect.width
         notch.hoverStrip = notchHover && !g.hasNotch
     }
 
-    /// Open frame: centred on the notch, flush with the TRUE top of the screen (over the menu bar).
+    /// Open frame: centred on the notch, flush with the TRUE top of the screen (over the menu bar),
+    /// or the virtual notch's 2pt inset.
     private func openFrame() -> NSRect {
-        guard let s = screen, let g = geo else { return panel.frame }
+        guard let g = geo else { return panel.frame }
         let size = notch.openWindowSize
-        return NSRect(x: g.notchRect.midX - size.width / 2, y: s.frame.maxY - size.height, width: size.width, height: size.height)
+        return NSRect(x: g.notchRect.midX - size.width / 2, y: g.notchRect.maxY - size.height, width: size.width, height: size.height)
     }
 
     /// Collapsed window: the notch widened by the ears' span on BOTH sides (so it stays centred on the
-    /// notch; the narrower side is clear pixels), or the 10pt strip on a notchless screen.
+    /// notch; the narrower side is clear pixels). Notchless: the virtual pill's frame while it has
+    /// ears, else the 10pt strip.
     private func collapsedFrame(span: CGFloat? = nil) -> NSRect {
         guard let g = geo else { return panel.frame }
-        return g.hasNotch ? g.notchRect.insetBy(dx: -(span ?? notch.earSpan), dy: 0) : g.collapsedRect
+        let span = span ?? notch.earSpan
+        if g.isVirtual && span == 0 { return g.collapsedRect }
+        return g.notchRect.insetBy(dx: -(span + notch.pillPad), dy: 0)
     }
 
-    /// The visible collapsed island (notch + actual ears), for the hover check.
+    /// The visible collapsed island (notch / pill + actual ears), for the hover check.
     private func islandRect() -> NSRect {
         guard let g = geo else { return panel.frame }
-        guard g.hasNotch, notch.hasEars else { return g.collapsedRect }
-        let r = g.notchRect
-        return NSRect(x: r.minX - notch.leftEar - NotchModel.earFlare, y: r.minY,
-                      width: r.width + notch.leftEar + notch.rightEar + 2 * NotchModel.earFlare, height: r.height)
+        guard notch.hasEars else { return g.collapsedRect }
+        let r = g.notchRect, w = notch.shapeSize(.collapsed).width
+        return NSRect(x: r.midX + notch.shapeOffset(.collapsed) - w / 2, y: r.minY, width: w, height: r.height)
     }
 
     private func rehome() {
@@ -795,9 +821,9 @@ final class PanelController {
         peekWatch?.invalidate()
         var outsideSince: CFTimeInterval?
         peekWatch = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] t in
-            guard let me = self, me.notch.phase == .peek, let s = me.screen, let g = me.geo else { t.invalidate(); return }
+            guard let me = self, me.notch.phase == .peek, let g = me.geo else { t.invalidate(); return }
             let size = me.notch.shapeSize(.peek)
-            let rect = NSRect(x: g.notchRect.midX - size.width / 2, y: s.frame.maxY - size.height,
+            let rect = NSRect(x: g.notchRect.midX - size.width / 2, y: g.notchRect.maxY - size.height,
                               width: size.width, height: size.height).union(me.islandRect()).insetBy(dx: -6, dy: -6)
             if rect.contains(NSEvent.mouseLocation) { outsideSince = nil; return }
             let now = CACurrentMediaTime()
