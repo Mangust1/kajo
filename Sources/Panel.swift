@@ -521,6 +521,11 @@ final class FloatingPanel: NSPanel {
     }
 }
 
+/// A click on a non-key window normally only brings it forward; the island is never key, so take the first click as a click.
+final class FirstMouseHostingView<V: View>: NSHostingView<V> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// Tracking-area owner (any object can own one): hover into the collapsed notch → peek.
 final class HoverTracker: NSResponder {
     var onEnter: (() -> Void)?
@@ -589,9 +594,9 @@ final class PanelController {
         let root = NotchRoot(notch: notch,
                              panel: PanelView(state: state, weather: weather, events: events, timer: timer, nowPlaying: nowPlaying, sound: sound, bluetooth: bluetooth, power: power, network: network, unifi: unifi, vpn: vpn, ha: ha, pi: pi, ai: ai, system: system, memes: memes, clipboard: clipboard, currency: currency, hours: hours, severa: severa),
                              hours: hours, claude: claude, nowPlaying: nowPlaying,
-                             pick: { [weak self] in self?.expand(tab: $0) },
+                             pick: { [weak self] in self?.toggle(tab: $0) },   // ear or peek icon: open that tab; the same ear again closes
                              openTerminal: { NSWorkspace.shared.open(URL(string: "soppi://toggle")!) })   // the Claude panes live in Soppi now (Kajo's own terminal is dormant)
-        let hosting = NSHostingView(rootView: root)
+        let hosting = FirstMouseHostingView(rootView: root)   // ear/peek clicks must work on the first click (the island is never key)
         hosting.sizingOptions = []                   // the controller owns the window size, not SwiftUI
         let container = NSView()                     // plain container so the tracking area isn't SwiftUI's to manage
         hosting.frame = container.bounds
