@@ -68,20 +68,15 @@ final class ClaudeStateModel: ObservableObject {
     }
 }
 
-/// `[ ▍ ✱ ▍ ]` like the SketchyBar box: left bar = personal, right bar = work, underline = renta.
+/// Three status lines, one per Claude instance (top → bottom: personal, work, renta), each coloured by its state.
 struct ClaudeGlyph: View {
     @ObservedObject var model: ClaudeStateModel
 
     var body: some View {
-        HStack(spacing: 4) {
-            Capsule().fill(model.personal.color).frame(width: 3, height: 16)
-            VStack(spacing: 2) {
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                Capsule().fill(model.renta.color).frame(width: 14, height: 3)
+        VStack(spacing: 3) {
+            ForEach([model.personal, model.work, model.renta].indices, id: \.self) { i in
+                Capsule().fill([model.personal, model.work, model.renta][i].color).frame(width: 16, height: 3)
             }
-            Capsule().fill(model.work.color).frame(width: 3, height: 16)
         }
         .animation(.easeOut(duration: 0.2), value: [model.personal, model.work, model.renta])
     }
