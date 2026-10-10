@@ -39,8 +39,6 @@
         <key>NSAllowsArbitraryLoads</key>
         <true/>
     </dict>
-        </dict>
-    </array>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
