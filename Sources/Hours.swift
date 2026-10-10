@@ -202,6 +202,7 @@ final class HoursModel: ObservableObject {
     func daySeconds(_ day: Date) -> TimeInterval {
         entries.filter { hoursCal.isDate($0.start, inSameDayAs: day) }.reduce(0) { $0 + $1.seconds }
     }
+    var todayTotal: TimeInterval { daySeconds(Date()) }      // the island's left ear
     // completed entries in the viewed month, grouped by day (newest day first), then by task
     // within each day (same task done several times collapses to one group). Running one lives in the card.
     func days() -> [(day: Date, groups: [TaskGroup])] {

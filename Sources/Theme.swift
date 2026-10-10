@@ -29,6 +29,7 @@ enum Gruv {
     static let green  = Color(hex: 0xb8bb26)
     static let yellow = Color(hex: 0xfabd2f)
     static let red    = Color(hex: 0xfb4934)
+    static let orange = Color(hex: 0xfe8019)
 }
 
 // "Not configured" / "unreachable" placeholder used by the Pi, Home and UniFi tabs.

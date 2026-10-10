@@ -14,7 +14,7 @@ blank. These files are the generic starting points; your real config lives in
 
 | File | What it controls |
 |---|---|
-| `config.json` | Which modules (tabs) are enabled, the menu-bar icon, and `notchHover` (default true: hovering the notch peeks a row of tab icons). `enabledModules` names match `kajo://tab/<name>`. Omit the file → all modules. |
+| `config.json` | Which modules (tabs) are enabled, the menu-bar icon, and `notchHover` (default true: hovering the notch peeks a row of tab icons) and `islandEars` (default true: hours + now-playing ears beside the notch). `enabledModules` names match `kajo://tab/<name>`. Omit the file → all modules. |
 | `calendar.json` | World-clock cities (name/tz/lat/lon) + `homeTimezone`. |
 | `clipboard.json` | History cap, secret TTL, max image MB, `nvrPath`, `nvimSocket`. |
 | `ai.json` | oMLX base URL. |

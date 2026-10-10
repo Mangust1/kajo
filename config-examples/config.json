@@ -1,5 +1,6 @@
 {
   "enabledModules": ["calendar", "timer", "music", "sound", "power", "network", "unifi", "vpn", "home", "pi", "ai", "system", "memes", "clipboard"],
   "menuBarIcon": true,
-  "notchHover": true
+  "notchHover": true,
+  "islandEars": true
 }

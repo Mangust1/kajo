@@ -77,17 +77,19 @@ let noConfigTabs: [PlaceholderTab] = [
 
 let configFiles: [ConfigFile] = [
     ConfigFile(name: "config.json", title: "General", symbol: "slider.horizontal.3", secret: false,
-        blurb: "Which tabs are enabled, the menu-bar icon, and the hover peek from the notch. Omit the file → all tabs.",
+        blurb: "Which tabs are enabled, the menu-bar icon, the hover peek from the notch and the island ears. Omit the file → all tabs.",
         fields: [
             Field(key: "menuBarIcon", label: "Menu-bar icon", kind: .toggle),
             Field(key: "notchHover", label: "Expand from the notch on hover", kind: .toggle),
+            Field(key: "islandEars", label: "Hours + now playing beside the notch", kind: .toggle),
             Field(key: "enabledModules", label: "Enabled tabs", kind: .modules),
         ],
         template: """
         {
           "enabledModules": [\(Tab.allCases.map { "\"\($0.rawValue)\"" }.joined(separator: ", "))],
           "menuBarIcon": true,
-          "notchHover": true
+          "notchHover": true,
+          "islandEars": true
         }
         """),
     ConfigFile(name: "calendar.json", title: "Calendar", symbol: "calendar", secret: false,

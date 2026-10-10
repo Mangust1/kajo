@@ -168,6 +168,10 @@ final class NotchModel: ObservableObject {
     @Published var notchWidth: CGFloat = 160
     @Published var neck: CGFloat = 0
     @Published var hoverStrip = false             // notchless + hover on: faint fill so the strip catches the mouse
+    @Published var leftEar: CGFloat = 0           // applied ear widths (content + 12pt padding), 0 = hidden;
+    @Published var rightEar: CGFloat = 0          // the controller sets them after sizing the window
+    @Published var musicEar = false               // track playing, or paused less than 60 s ago
+    var onEarsMeasured: (([Int: CGFloat]) -> Void)?
 
     static let panelSize = CGSize(width: 430, height: 660)
     static let margin: CGFloat = 48               // room around the shape for its SwiftUI shadow
@@ -175,10 +179,19 @@ final class NotchModel: ObservableObject {
     let peekTabs = Tab.allCases.filter { enabledModules.contains($0) }
 
     var flared: Bool { neck > 0 }                 // concave top corners only when fusing with a real notch
+    var earsAllowed: Bool { islandEars && flared }
+    var hasEars: Bool { leftEar > 0 || rightEar > 0 }
+    static let earFlare: CGFloat = 8
+    static let earCap: CGFloat = 230              // ear content is width-capped; the open window reserves this much
+    /// How far the collapsed island reaches past the notch on its wider side (window = notch ± span).
+    static func earSpan(_ l: CGFloat, _ r: CGFloat) -> CGFloat { l > 0 || r > 0 ? max(l, r) + earFlare : 0 }
+    var earSpan: CGFloat { Self.earSpan(leftEar, rightEar) }
+    /// Ears can be uneven: the collapsed shape shifts so its notch gap stays on the hardware notch.
+    func shapeOffset(_ p: NotchPhase) -> CGFloat { p == .collapsed ? (rightEar - leftEar) / 2 : 0 }
 
     func topRadius(_ p: NotchPhase) -> CGFloat {
         switch p {
-        case .collapsed: return 0
+        case .collapsed: return hasEars ? Self.earFlare : 0
         case .peek:      return flared ? 8 : 12
         case .expanded:  return flared ? 10 : 18
         }
@@ -190,16 +203,18 @@ final class NotchModel: ObservableObject {
     func shapeSize(_ p: NotchPhase) -> CGSize {
         let flare = flared ? 2 * topRadius(p) : 0
         switch p {
-        case .collapsed: return CGSize(width: notchWidth, height: neck)
+        case .collapsed: return CGSize(width: notchWidth + leftEar + rightEar + flare, height: neck)
         case .peek:
             let row = CGFloat(peekTabs.count) * Self.peekCell + 24
-            return CGSize(width: max(notchWidth + 2 * 112, row + flare), height: neck + 44)
+            let island = notchWidth + 2 * max(leftEar, rightEar) + flare   // ears stay inside the neck band
+            return CGSize(width: max(notchWidth + 2 * 112, row + flare, island), height: neck + 44)
         case .expanded:  return CGSize(width: Self.panelSize.width + flare, height: neck + Self.panelSize.height)
         }
     }
     /// The open window: big enough for the widest state plus the shadow margin.
     var openWindowSize: CGSize {
-        CGSize(width: max(shapeSize(.expanded).width, shapeSize(.peek).width) + 2 * Self.margin,
+        CGSize(width: max(shapeSize(.expanded).width, shapeSize(.peek).width,
+                          earsAllowed ? notchWidth + 2 * (Self.earCap + Self.earFlare) : 0) + 2 * Self.margin,   // ears may grow while open
                height: neck + Self.panelSize.height + Self.margin)
     }
 }
@@ -268,11 +283,16 @@ struct NotchBlur: NSViewRepresentable {
 struct NotchRoot: View {
     @ObservedObject var notch: NotchModel
     let panel: PanelView
+    let hours: HoursModel
+    let claude: ClaudeStateModel
+    let nowPlaying: NowPlayingModel
     let pick: (Tab) -> Void
+    let openTerminal: () -> Void
 
     var body: some View {
         let phase = notch.phase
         let size = notch.shapeSize(phase)
+        let offset = notch.shapeOffset(phase)
         let shape = NotchShape(flared: notch.flared, topRadius: notch.topRadius(phase), bottomRadius: notch.bottomRadius(phase))
         ZStack(alignment: .top) {
             NotchBlur()
@@ -291,6 +311,7 @@ struct NotchRoot: View {
                         .animation(phase == .expanded ? .easeOut(duration: 0.18).delay(0.1) : .easeOut(duration: 0.1), value: phase)
                 }
             }
+            ears.offset(x: (notch.rightEar - notch.leftEar) / 2 - offset)   // notch gap on the hardware notch in every phase
         }
         .frame(width: size.width, height: size.height, alignment: .top)
         .clipShape(shape)
@@ -299,9 +320,26 @@ struct NotchRoot: View {
                 .mask(VStack(spacing: 0) { Color.clear.frame(height: notch.neck); Color.white })   // body only, not the neck
         )
         .shadow(color: .black.opacity(phase == .collapsed ? 0 : 0.55), radius: 22, y: 10)   // drawn here: a window shadow would halo the collapsed notch
+        .offset(x: offset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.black.opacity(notch.hoverStrip && phase == .collapsed ? 0.01 : 0))  // fully clear pixels don't receive the mouse
         .ignoresSafeArea()                                            // the window covers the notch: no safe-area push-down
+    }
+
+    /// Live widgets flanking the notch inside the black neck. Each ear reports its natural width;
+    /// the controller sizes the window, then springs leftEar/rightEar to it.
+    private var ears: some View {
+        let fits = notch.notchWidth + 2 * max(notch.leftEar, notch.rightEar) <= NotchModel.panelSize.width
+        return HStack(spacing: 0) {
+            LeftEar(hours: hours, claude: claude, on: notch.earsAllowed, tapHours: { pick(.hours) }, tapClaude: openTerminal)
+                .frame(width: notch.leftEar, alignment: .trailing).clipped()
+            Color.clear.frame(width: notch.notchWidth)
+            MusicEar(model: nowPlaying, on: notch.earsAllowed && notch.musicEar) { pick(.music) }
+                .frame(width: notch.rightEar, alignment: .leading).clipped()
+        }
+        .frame(height: notch.neck)
+        .opacity(notch.phase != .expanded || fits ? 1 : 0)        // expanded neck is 430 wide: hide rather than clip
+        .onPreferenceChange(EarWidthKey.self) { w in notch.onEarsMeasured?(w) }
     }
 
     /// Mini launcher shown on hover: the enabled tabs' rail icons, centred under the neck.
@@ -314,6 +352,141 @@ struct NotchRoot: View {
             }
         }
         .frame(height: 44)
+    }
+}
+
+// MARK: - Island ears
+
+/// Natural ear widths keyed by side (0 = claude+hours/left, 1 = music/right); a hidden ear reports nothing → 0.
+struct EarWidthKey: PreferenceKey {
+    static let defaultValue: [Int: CGFloat] = [:]
+    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+private extension View {
+    /// Shared ear chrome: fixed natural size + 12pt padding, measured, clickable, fades in after the width springs.
+    func ear(_ side: Int, tap: @escaping () -> Void) -> some View {
+        fixedSize()
+            .padding(.horizontal, 6)
+            .background(GeometryReader { Color.clear.preference(key: EarWidthKey.self, value: [side: $0.size.width]) })
+            .contentShape(Rectangle())
+            .onTapGesture(perform: tap)
+            .transition(.asymmetric(insertion: .opacity.animation(.easeOut(duration: 0.2).delay(0.25)),
+                                    removal: .opacity.animation(.easeOut(duration: 0.1))))
+    }
+}
+
+private func hhmm(_ s: TimeInterval) -> String {
+    let m = max(0, Int(s)) / 60
+    return String(format: "%d:%02d", m / 60, m % 60)
+}
+
+/// Left ear: the Claude Code glyph (outermost, while any session isn't idle), then the running
+/// timer (task + elapsed), else today's total. Each part has its own click target.
+struct LeftEar: View {
+    @ObservedObject var hours: HoursModel
+    @ObservedObject var claude: ClaudeStateModel
+    let on: Bool
+    let tapHours: () -> Void
+    let tapClaude: () -> Void
+
+    var body: some View {
+        let showClaude = on && claude.active
+        let showHours = on && (hours.running != nil || hours.todayTotal > 0)
+        if showClaude || showHours {
+            HStack(spacing: 6) {
+                if showClaude {
+                    ClaudeGlyph(model: claude)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: tapClaude)
+                        .transition(.opacity.animation(.easeOut(duration: 0.2)))
+                }
+                if showHours {
+                    HoursEarContent(model: hours)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: tapHours)
+                }
+            }
+            .ear(0, tap: showHours ? tapHours : tapClaude)   // padding taps go to the visible part
+        }
+    }
+}
+
+/// Hours part of the left ear: the running timer, else today's total (caller checks there is one).
+struct HoursEarContent: View {
+    @ObservedObject var model: HoursModel
+
+    var body: some View {
+        Group {
+            if let r = model.running {
+                HStack(spacing: 5) {
+                    Image(systemName: "clock").foregroundStyle(Gruv.aqua)
+                    Text(r.task).foregroundStyle(Gruv.fg1).lineLimit(1).truncationMode(.tail)
+                        .frame(maxWidth: 110, alignment: .leading)
+                    Text(hhmm(model.tick.timeIntervalSince(r.start))).foregroundStyle(Gruv.aqua)
+                }
+            } else {
+                HStack(spacing: 5) {
+                    Image(systemName: "clock").foregroundStyle(Gruv.fg4)
+                    Text(hhmm(model.todayTotal)).foregroundStyle(Gruv.fg2)
+                }
+            }
+        }
+        .font(.system(size: 12, weight: .medium).monospacedDigit())
+    }
+}
+
+/// Right ear: artwork, title / artist, and a bar glyph that bounces while playing.
+struct MusicEar: View {
+    @ObservedObject var model: NowPlayingModel
+    let on: Bool
+    let tap: () -> Void
+
+    var body: some View {
+        if on, model.hasTrack {
+            HStack(spacing: 6) {
+                Group {
+                    if let a = model.artwork {
+                        Image(nsImage: a).resizable().scaledToFill()
+                    } else {
+                        Gruv.bg3.overlay(Image(systemName: "music.note").font(.system(size: 11)).foregroundStyle(Gruv.fg2))
+                    }
+                }
+                .frame(width: 22, height: 22)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(model.title).foregroundStyle(Gruv.fg1)
+                    Text(model.artist).foregroundStyle(Gruv.fg4)
+                }
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1).truncationMode(.tail)
+                .frame(maxWidth: 150, alignment: .leading)
+                PlayingBars(playing: model.isPlaying)
+            }
+            .ear(1, tap: tap)
+        }
+    }
+}
+
+/// Three capsules; each bar repeats at its own speed so the bounce doesn't look mechanical.
+struct PlayingBars: View {
+    let playing: Bool
+    @State private var up = false
+    private let highs: [CGFloat] = [9, 13, 7], lows: [CGFloat] = [4, 6, 3], speeds = [0.45, 0.6, 0.38]
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 2) {
+            ForEach(0..<3, id: \.self) { i in
+                Capsule().fill(playing ? Gruv.green : Gruv.fg4)
+                    .frame(width: 3, height: up ? highs[i] : lows[i])
+                    .animation(up ? .easeInOut(duration: speeds[i]).repeatForever(autoreverses: true) : .easeOut(duration: 0.2), value: up)
+            }
+        }
+        .frame(height: 13, alignment: .bottom)
+        .onAppear { up = playing }
+        .onChange(of: playing) { _, p in up = p }
     }
 }
 
@@ -331,6 +504,9 @@ final class FloatingPanel: NSPanel {
 final class HoverTracker: NSResponder {
     var onEnter: (() -> Void)?
     override func mouseEntered(with event: NSEvent) { onEnter?() }
+    // The collapsed window is symmetric around the notch, so with uneven ears the mouse can enter
+    // through clear pixels first; moves keep re-checking (peek() is a cheap guard while not collapsed).
+    override func mouseMoved(with event: NSEvent) { onEnter?() }
 }
 
 // MARK: - Panel controller
@@ -356,6 +532,7 @@ final class PanelController {
     let clipboard = ClipboardModel()
     let currency = CurrencyModel()
     let hours = HoursModel()
+    let claude = ClaudeStateModel()
     let severa = MainActor.assumeIsolated { SeveraModel() }   // app-lifetime: token + project cache survive tab switches
     let notch = NotchModel()
     private let panel: FloatingPanel
@@ -368,6 +545,9 @@ final class PanelController {
     private var geo: NotchGeometry?                  // that screen's notch
     private var animGen = 0                          // drops completions of interrupted animations
     private var peekWatch: Timer?
+    private var windowCollapsed = false              // window is the small collapsed frame (not mid-close)
+    private var earGen = 0
+    private var musicEarOff: Timer?
 
     private var isOpen: Bool { notch.phase == .expanded }
 
@@ -387,7 +567,9 @@ final class PanelController {
 
         let root = NotchRoot(notch: notch,
                              panel: PanelView(state: state, weather: weather, events: events, timer: timer, nowPlaying: nowPlaying, sound: sound, bluetooth: bluetooth, power: power, network: network, unifi: unifi, vpn: vpn, ha: ha, pi: pi, ai: ai, system: system, memes: memes, clipboard: clipboard, currency: currency, hours: hours, severa: severa),
-                             pick: { [weak self] in self?.expand(tab: $0) })
+                             hours: hours, claude: claude, nowPlaying: nowPlaying,
+                             pick: { [weak self] in self?.expand(tab: $0) },
+                             openTerminal: { NSWorkspace.shared.open(URL(string: "soppi://toggle")!) })   // the Claude panes live in Soppi now (Kajo's own terminal is dormant)
         let hosting = NSHostingView(rootView: root)
         hosting.sizingOptions = []                   // the controller owns the window size, not SwiftUI
         let container = NSView()                     // plain container so the tracking area isn't SwiftUI's to manage
@@ -395,7 +577,7 @@ final class PanelController {
         hosting.autoresizingMask = [.width, .height]
         container.addSubview(hosting)
         tracker.onEnter = { [weak self] in self?.peek() }
-        container.addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+        container.addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
                                                  owner: tracker, userInfo: nil))
         panel.contentView = container
 
@@ -421,8 +603,19 @@ final class PanelController {
             .sink { [weak self] tab in self?.updatePolling(forTab: tab) }
             .store(in: &cancellables)
 
+        // Island ears: measured widths come back from SwiftUI; the music ear outlives a pause by 60 s.
+        notch.onEarsMeasured = { [weak self] w in   // async: never resize the window inside a SwiftUI update
+            DispatchQueue.main.async { self?.setEars(w[0] ?? 0, w[1] ?? 0) }
+        }
+        nowPlaying.$isPlaying.combineLatest(nowPlaying.$hasTrack)
+            .map { [$0, $1] }.removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] v in self?.gateMusicEar(playing: v[0], hasTrack: v[1]) }
+            .store(in: &cancellables)
+
         if enabledModules.contains(.clipboard) { clipboard.startMonitoring() }   // app-lifetime monitor, only if enabled
         DispatchQueue.main.async { [weak self] in self?.rehome() }   // park collapsed in the notch once the app is running
+        DispatchQueue.main.async { [weak self] in self?.nowPlaying.refresh() }   // ear knows about a track already playing at launch (notifications only arrive on changes)
     }
 
     private func updatePolling(forTab tab: Tab) {
@@ -467,7 +660,7 @@ final class PanelController {
     func collapse() {
         if isOpen { hide(); return }
         guard notch.phase == .peek else { return }
-        animate(to: .collapsed, .spring(response: 0.3, dampingFraction: 0.85)) { $0.settleCollapsed() }
+        animate(to: .collapsed, .spring(response: 0.3, dampingFraction: 1.0)) { $0.settleCollapsed() }   // critically damped: an overshoot shrinks the ears and rebounds (wobble)
     }
 
     func closePanel() { hide() }
@@ -502,11 +695,63 @@ final class PanelController {
         return NSRect(x: g.notchRect.midX - size.width / 2, y: s.frame.maxY - size.height, width: size.width, height: size.height)
     }
 
+    /// Collapsed window: the notch widened by the ears' span on BOTH sides (so it stays centred on the
+    /// notch; the narrower side is clear pixels), or the 10pt strip on a notchless screen.
+    private func collapsedFrame(span: CGFloat? = nil) -> NSRect {
+        guard let g = geo else { return panel.frame }
+        return g.hasNotch ? g.notchRect.insetBy(dx: -(span ?? notch.earSpan), dy: 0) : g.collapsedRect
+    }
+
+    /// The visible collapsed island (notch + actual ears), for the hover check.
+    private func islandRect() -> NSRect {
+        guard let g = geo else { return panel.frame }
+        guard g.hasNotch, notch.hasEars else { return g.collapsedRect }
+        let r = g.notchRect
+        return NSRect(x: r.minX - notch.leftEar - NotchModel.earFlare, y: r.minY,
+                      width: r.width + notch.leftEar + notch.rightEar + 2 * NotchModel.earFlare, height: r.height)
+    }
+
     private func rehome() {
         guard notch.phase == .collapsed, let s = homeScreen() else { return }   // an open panel re-homes when it closes
         use(s)
-        panel.setFrame(geo?.collapsedRect ?? panel.frame, display: true)
+        panel.setFrame(collapsedFrame(), display: true)
+        windowCollapsed = true
         panel.orderFrontRegardless()
+    }
+
+    /// New ear widths. Collapsed: a growing island widens the window first and springs on the next
+    /// turn (same trick as grow()); a shrinking one springs first and shrinks the window after.
+    /// Open or mid-close: the window is already big, just spring.
+    private func setEars(_ l: CGFloat, _ r: CGFloat) {
+        guard abs(l - notch.leftEar) > 0.5 || abs(r - notch.rightEar) > 0.5 else { return }
+        let spring = Animation.spring(response: 0.35, dampingFraction: 0.85)
+        earGen += 1
+        let gen = earGen
+        let apply = { [weak self] in self?.notch.leftEar = l; self?.notch.rightEar = r }
+        guard windowCollapsed else { withAnimation(spring) { apply() }; return }
+        let span = NotchModel.earSpan(l, r)
+        if span > notch.earSpan {
+            panel.setFrame(collapsedFrame(span: span), display: true)
+            panel.contentView?.layoutSubtreeIfNeeded()
+            DispatchQueue.main.async { [weak self] in
+                guard self?.earGen == gen else { return }
+                withAnimation(spring) { apply() }
+            }
+        } else {
+            withAnimation(spring, completionCriteria: .removed) { apply() } completion: { [weak self] in
+                guard let me = self, me.earGen == gen, me.windowCollapsed else { return }
+                me.panel.setFrame(me.collapsedFrame(), display: true)
+            }
+        }
+    }
+
+    private func gateMusicEar(playing: Bool, hasTrack: Bool) {
+        musicEarOff?.invalidate(); musicEarOff = nil
+        if hasTrack && playing { notch.musicEar = true }
+        else if !hasTrack { notch.musicEar = false }
+        else if notch.musicEar {                     // paused: linger 60 s, a quick pause/resume shouldn't flicker
+            musicEarOff = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { [weak self] _ in self?.notch.musicEar = false }
+        }
     }
 
     // MARK: phases
@@ -526,8 +771,8 @@ final class PanelController {
 
     /// Hover into the collapsed notch → mini launcher.
     private func peek() {
-        guard notchHover, notch.phase == .collapsed, let g = geo,
-              g.collapsedRect.insetBy(dx: -2, dy: -2).contains(NSEvent.mouseLocation) else { return }   // not the big window mid-close
+        guard notchHover, notch.phase == .collapsed, geo != nil,
+              islandRect().insetBy(dx: -2, dy: -2).contains(NSEvent.mouseLocation) else { return }   // not the big window mid-close
         grow { me in
             me.animate(to: .peek, .spring(response: 0.3, dampingFraction: 0.85))
             me.watchPeek()
@@ -538,6 +783,7 @@ final class PanelController {
     /// layout pass as the spring made SwiftUI interpolate the shape's position from its spot in the
     /// small window, so the panel looked like it opened from the top-left.
     private func grow(then: @escaping (PanelController) -> Void) {
+        windowCollapsed = false
         panel.setFrame(openFrame(), display: true)
         panel.contentView?.layoutSubtreeIfNeeded()
         DispatchQueue.main.async { [weak self] in if let me = self { then(me) } }
@@ -552,7 +798,7 @@ final class PanelController {
             guard let me = self, me.notch.phase == .peek, let s = me.screen, let g = me.geo else { t.invalidate(); return }
             let size = me.notch.shapeSize(.peek)
             let rect = NSRect(x: g.notchRect.midX - size.width / 2, y: s.frame.maxY - size.height,
-                              width: size.width, height: size.height).insetBy(dx: -6, dy: -6)
+                              width: size.width, height: size.height).union(me.islandRect()).insetBy(dx: -6, dy: -6)
             if rect.contains(NSEvent.mouseLocation) { outsideSince = nil; return }
             let now = CACurrentMediaTime()
             if let since = outsideSince { if now - since >= 0.25 { t.invalidate(); me.collapse() } }
@@ -583,8 +829,11 @@ final class PanelController {
     private func settleCollapsed() {
         guard let s = homeScreen() else { return }
         use(s)
-        panel.orderOut(nil)
-        panel.setFrame(geo?.collapsedRect ?? panel.frame, display: true)
+        if panel.isKeyWindow { panel.orderOut(nil) }       // only a key panel can swallow keystrokes; the orderOut/orderFront pair flickers the ears otherwise
+        panel.setFrame(collapsedFrame(), display: false)
+        panel.contentView?.layoutSubtreeIfNeeded()        // lay the island out in the small frame before it is drawn
+        panel.displayIfNeeded()
+        windowCollapsed = true
         panel.orderFrontRegardless()
     }
 
