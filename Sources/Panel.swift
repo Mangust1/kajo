@@ -317,7 +317,7 @@ struct NotchRoot: View {
         ZStack(alignment: .top) {
             NotchBlur()
             Gruv.bg0.opacity(0.72)
-            Color.black.frame(height: notch.neck)                     // neck band: fuses with the hardware notch
+            (notch.virtual ? Gruv.bg0 : Color.black).frame(height: notch.neck)   // neck band: fuses with the hardware notch; a virtual notch matches SketchyBar's bar (bg0)
             VStack(spacing: 0) {
                 Color.clear.frame(height: notch.neck)
                 ZStack(alignment: .top) {
