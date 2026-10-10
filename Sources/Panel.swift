@@ -205,7 +205,9 @@ final class NotchModel: ObservableObject {
     /// Extra half-width the collapsed window needs for the 160pt minimum pill (virtual notch only).
     var pillPad: CGFloat { virtual ? (Self.minPill - notchWidth) / 2 : 0 }
     /// Ears can be uneven: the collapsed shape shifts so its notch gap stays on the hardware notch.
-    func shapeOffset(_ p: NotchPhase) -> CGFloat { p == .collapsed ? (rightEar - leftEar) / 2 : 0 }
+    /// A virtual pill has no hardware to anchor to: ears sit centred as a group, so a lone ear is mid-pill.
+    func shapeOffset(_ p: NotchPhase) -> CGFloat { p == .collapsed && !virtual ? (rightEar - leftEar) / 2 : 0 }
+    var earGap: CGFloat { virtual ? 0 : notchWidth }
 
     func topRadius(_ p: NotchPhase) -> CGFloat {
         switch p {
@@ -331,7 +333,7 @@ struct NotchRoot: View {
                         .animation(phase == .expanded ? .easeOut(duration: 0.18).delay(0.1) : .easeOut(duration: 0.1), value: phase)
                 }
             }
-            ears.offset(x: (notch.rightEar - notch.leftEar) / 2 - offset)   // notch gap on the hardware notch in every phase
+            ears.offset(x: (notch.virtual ? 0 : (notch.rightEar - notch.leftEar) / 2) - offset)   // notch gap on the hardware notch in every phase
         }
         .opacity(notch.virtual && phase == .collapsed && !notch.hasEars ? 0 : 1)   // virtual pill fades with its last ear
         .frame(width: size.width, height: size.height, alignment: .top)
@@ -354,7 +356,7 @@ struct NotchRoot: View {
         return HStack(spacing: 0) {
             LeftEar(hours: hours, claude: claude, on: notch.earsAllowed, tapHours: { pick(.hours) }, tapClaude: openTerminal)
                 .frame(width: notch.leftEar, alignment: .trailing).clipped()
-            Color.clear.frame(width: notch.notchWidth)
+            Color.clear.frame(width: notch.earGap)
             MusicEar(model: nowPlaying, on: notch.earsAllowed && notch.musicEar) { pick(.music) }
                 .frame(width: notch.rightEar, alignment: .leading).clipped()
         }
@@ -574,6 +576,7 @@ final class PanelController {
     private var windowCollapsed = false              // window is the small collapsed frame (not mid-close)
     private var earGen = 0
     private var musicEarOff: Timer?
+    private var menuBarWatch: NSKeyValueObservation?
 
     private var isOpen: Bool { notch.phase == .expanded }
 
@@ -621,7 +624,10 @@ final class PanelController {
         ) { [weak self] note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             if app.bundleIdentifier != Bundle.main.bundleIdentifier { self?.previousApp = app }
+            self?.syncVisibility()
         }
+        // The collapsed island follows the menu bar (a game hiding it covers the island's spot).
+        menuBarWatch = NSApp.observe(\.currentSystemPresentationOptions) { [weak self] _, _ in self?.syncVisibility() }
 
         // Poll now-playing only while the Music tab is open.
         state.$tab
@@ -751,7 +757,22 @@ final class PanelController {
         use(s)
         panel.setFrame(collapsedFrame(), display: true)
         windowCollapsed = true
-        panel.orderFrontRegardless()
+        syncVisibility()
+    }
+
+    /// Menu bar hidden system-wide = a game or fullscreen app owns the top of the screen (WoW: a
+    /// layer-0 window over the whole display with `.hideMenuBar`). A fullscreen space hides the bar
+    /// too, but on a real notch the band stays black and free, so only the virtual pill minds it.
+    /// ponytail: system-wide flag, not per display — a game on the other screen also hides the pill.
+    private var menuBarHidden: Bool {
+        let o = NSApp.currentSystemPresentationOptions
+        return o.contains(.hideMenuBar) || (notch.virtual && o.contains(.fullScreen))
+    }
+
+    /// Collapsed island shown or ordered out to match the menu bar. The open panel is never touched.
+    private func syncVisibility() {
+        guard windowCollapsed else { return }
+        if menuBarHidden { panel.orderOut(nil) } else if !panel.isVisible { panel.orderFrontRegardless() }
     }
 
     /// New ear widths. Collapsed: a growing island widens the window first and springs on the next
@@ -868,7 +889,7 @@ final class PanelController {
         panel.contentView?.layoutSubtreeIfNeeded()        // lay the island out in the small frame before it is drawn
         panel.displayIfNeeded()
         windowCollapsed = true
-        panel.orderFrontRegardless()
+        syncVisibility()
     }
 
     private func stopAllPolling() {

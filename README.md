@@ -128,6 +128,8 @@ open "kajo://scratch"           # toggle the always-on-top scratch notepad (~/.c
 
 ## Status
 
+v0.34.6 — The collapsed island follows the menu bar: a game or fullscreen app that hides it (system-wide `hideMenuBar`, or a fullscreen space on a notchless display) takes the pill with it, back when the bar returns. On a virtual notch the ears centre as a group, so a lone ear sits mid-pill. 0.34.1–0.34.5: pill in the bar colour, one-click ears, same target toggles closed, no blink on close.
+
 v0.34.0 — **Virtual notch**: the island homes on the primary display instead of the first notched one; on a notchless primary it is a rounded black pill floating inside the menu bar (bar height − 4 pt, 2 pt from the top, min 160 pt), visible while an ear has content, else the invisible 10 pt hover strip. Peek and the panel grow out of the pill. A MacBook notch on a secondary screen stays bare.
 
 v0.33.1 — **Claude ear**: Claude Code session state (personal / work / renta, from the hook's `~/.config/kajo/claude-state/<who>` files, watched, no polling) as a glyph at the outer end of the left ear, replacing SketchyBar's claude group; click opens the terminal.
