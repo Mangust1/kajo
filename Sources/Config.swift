@@ -68,7 +68,7 @@ enum Tab: String, CaseIterable, Identifiable {
     }
 }
 
-// config.json (optional): { "enabledModules": ["calendar",…], "menuBarIcon": true }
+// config.json (optional): { "enabledModules": ["calendar",…], "menuBarIcon": true, "notchHover": true }
 // "enabledModules" uses the same names as kajo://tab/<name>.
 let appConfig: [String: Any] = {
     guard let d = try? Data(contentsOf: URL(fileURLWithPath: kajoConfigDir + "/config.json")),
@@ -83,6 +83,9 @@ let enabledModules: Set<Tab> = {
 // Menu-bar launch trigger — on by default so a fresh install is usable without
 // sketchybar; set "menuBarIcon": false to hide it (e.g. if you summon elsewhere).
 let menuBarEnabled = (appConfig["menuBarIcon"] as? Bool) ?? true
+// Hovering the notch (or the top-centre strip on a notchless screen) peeks a row of tab icons;
+// "notchHover": false keeps the panel to explicit summons only.
+let notchHover = (appConfig["notchHover"] as? Bool) ?? true
 
 // MARK: - Launch another app + dismiss the panel
 
