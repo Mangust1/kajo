@@ -864,7 +864,6 @@ final class PanelController {
     private func settleCollapsed() {
         guard let s = homeScreen() else { return }
         use(s)
-        if panel.isKeyWindow { panel.orderOut(nil) }       // only a key panel can swallow keystrokes; the orderOut/orderFront pair flickers the ears otherwise
         panel.setFrame(collapsedFrame(), display: false)
         panel.contentView?.layoutSubtreeIfNeeded()        // lay the island out in the small frame before it is drawn
         panel.displayIfNeeded()
