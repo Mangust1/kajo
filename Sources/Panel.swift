@@ -667,9 +667,13 @@ final class PanelController {
         }
     }
 
+    private var dismissedByClick: (tab: Tab, at: Date)?
+
     func toggle(tab: Tab) {
         if isOpen {
             if state.tab == tab { hide() } else { state.tab = tab }   // already open: just switch, don't replay the drop
+        } else if let d = dismissedByClick, d.tab == tab, Date().timeIntervalSince(d.at) < 0.5 {
+            dismissedByClick = nil                                   // the click that just closed this tab (bar button) — stay closed
         } else {
             state.tab = tab
             show()
@@ -881,7 +885,9 @@ final class PanelController {
     private func installMonitors() {
         removeMonitors()
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.hide()
+            guard let self else { return }
+            self.dismissedByClick = (self.state.tab, Date())   // a SketchyBar button's kajo:// arrives right after this click
+            self.hide()
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
