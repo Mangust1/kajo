@@ -128,6 +128,8 @@ open "kajo://scratch"           # toggle the scratch notepad that drops from the
 
 ## Status
 
+v0.35.1 — Scratch no longer remembers its collapsed start frame as the size (opened as a 120 pt strip after install).
+
 v0.35.0 — **Scratch drops from the notch**: the notepad is a borderless window pinned top-centre under the notch of the screen under the mouse (the menu bar and the island stay visible above it), slides down out of the bar and back up on close, Soppi-style orange frame (dimmed while another window is key), rounded bottom corners. Edge-resizable (size remembered), a grab handle at the bottom right drags it anywhere, the reset icon / ⌘0 pins it back at the default size. `scratchSize` ([1300, 660]) and `scratchFontSize` (13) in `config.json`. The hover peek row gains a Scratch icon that opens the notepad instead of the panel.
 
 v0.34.6 — The collapsed island follows the menu bar: a game or fullscreen app that hides it (system-wide `hideMenuBar`, or a fullscreen space on a notchless display) takes the pill with it, back when the bar returns. On a virtual notch the ears centre as a group, so a lone ear sits mid-pill. 0.34.1–0.34.5: pill in the bar colour, one-click ears, same target toggles closed, no blink on close.

@@ -122,6 +122,7 @@ final class ScratchWindowController: NSObject, NSWindowDelegate, NSTextViewDeleg
     private static let toolStrip: CGFloat = 30 // bottom strip for the grab handle + reset, outside the text view
     private var pinned = true                  // false: unpinned from the notch, drag the band to move it
     private var animGen = 0                    // drops completions of interrupted animations
+    private var animating = false
     private var pendingSave: DispatchWorkItem?
     private let url = URL(fileURLWithPath: kajoConfigDir + "/scratch.txt")
 
@@ -168,12 +169,14 @@ final class ScratchWindowController: NSObject, NSWindowDelegate, NSTextViewDeleg
     private func animate(_ w: NSWindow, to r: NSRect, done: (() -> Void)? = nil) {
         animGen += 1
         let gen = animGen
+        animating = true
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.22
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             w.animator().setFrame(r, display: true)
         }, completionHandler: { [weak self] in
             guard let me = self, me.animGen == gen else { return }
+            me.animating = false
             done?()
         })
     }
@@ -299,7 +302,9 @@ final class ScratchWindowController: NSObject, NSWindowDelegate, NSTextViewDeleg
 
     /// Only the size is remembered; the position is recomputed from the notch on every show.
     func windowDidEndLiveResize(_ notification: Notification) {
-        guard let w = window else { return }
+        // 2026-10-13: the installed app once stored 1300×120 — the sliver (clamped to minSize) was
+        // reported as a finished resize. Never save while the drop animation runs or at the sliver size.
+        guard let w = window, !animating, w.frame.height > Self.minSize.height + 1 else { return }
         UserDefaults.standard.set(NSStringFromSize(w.frame.size), forKey: Self.sizeKey)
     }
 
