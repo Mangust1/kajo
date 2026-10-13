@@ -879,11 +879,13 @@ final class PanelController {
 
     private func show() {
         if let s = screenUnderMouse() { use(s) }
-        grow { me in me.animate(to: .expanded, .spring(response: 0.42, dampingFraction: 0.78)) }
+        grow { me in
+            me.animate(to: .expanded, .spring(response: 0.42, dampingFraction: 0.78))
+            me.updatePolling(forTab: me.state.tab)   // after the phase flips: isOpen is false until grow's next-tick hop
+        }
         panel.makeKeyAndOrderFront(nil)
         if state.tab == .memes || state.tab == .clipboard { NSApp.activate(ignoringOtherApps: true) }   // text fields need the app active for keyboard focus
         installMonitors()
-        updatePolling(forTab: state.tab)
     }
 
     private func hide() {

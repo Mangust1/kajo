@@ -129,6 +129,7 @@ open "kajo://scratch"           # toggle the scratch notepad that drops from the
 ## Status
 
 v0.35.1 — Scratch no longer remembers its collapsed start frame as the size (opened as a 120 pt strip after install).
+v0.35.2 — Power tab (percent, draining wattage, time left) froze when the panel opened straight onto it: polling started one runloop tick before the island counted as open, so it was stopped instead. Same path for every polled tab since the notch island.
 
 v0.35.0 — **Scratch drops from the notch**: the notepad is a borderless window pinned top-centre under the notch of the screen under the mouse (the menu bar and the island stay visible above it), slides down out of the bar and back up on close, Soppi-style orange frame (dimmed while another window is key), rounded bottom corners. Edge-resizable (size remembered), a grab handle at the bottom right drags it anywhere, the reset icon / ⌘0 pins it back at the default size. `scratchSize` ([1300, 660]) and `scratchFontSize` (13) in `config.json`. The hover peek row gains a Scratch icon that opens the notepad instead of the panel.
 
