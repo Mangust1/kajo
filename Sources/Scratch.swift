@@ -14,6 +14,8 @@ private final class ScratchWindow: NSWindow {
     override var canBecomeKey: Bool { true }   // borderless windows refuse key by default: typing needs it
     override var canBecomeMain: Bool { true }
 
+    override func cancelOperation(_ sender: Any?) { onClose?() }   // Esc: the text view forwards it up the responder chain
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command {
             switch event.charactersIgnoringModifiers {
