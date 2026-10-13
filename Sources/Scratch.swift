@@ -157,12 +157,12 @@ final class ScratchWindowController: NSObject, NSWindowDelegate, NSTextViewDeleg
         // Never hang below the screen (a MacBook is shorter than the default): leave 60pt for the Dock.
         // ponytail: screen height, not visibleFrame maths — the coordinate version clamped to a strip.
         if let s = screen { h = min(h, s.frame.height - 60) }
-        return NSRect(x: g.notchRect.midX - w / 2, y: g.notchRect.maxY - h, width: w, height: h)
+        return NSRect(x: g.notchRect.midX - w / 2, y: g.notchRect.minY - h, width: w, height: h)   // hangs from the bottom of the bar/notch, no neck band (Magnus: a 1300 pt black bar was pointless)
     }
 
     /// The same rect collapsed to the neck band, top edge fixed.
     private func sliver(_ r: NSRect, _ g: NotchGeometry) -> NSRect {
-        NSRect(x: r.minX, y: r.maxY - g.neck, width: r.width, height: g.neck)
+        NSRect(x: r.minX, y: r.maxY - 2, width: r.width, height: 2)
     }
 
     private func animate(_ w: NSWindow, to r: NSRect, done: (() -> Void)? = nil) {
@@ -184,7 +184,6 @@ final class ScratchWindowController: NSObject, NSWindowDelegate, NSTextViewDeleg
         let g = NotchGeometry(screen: s)
         let moved = geo.map { $0.notchRect != g.notchRect } ?? true
         geo = g; screen = s
-        band?.layer?.backgroundColor = NSColor(g.isVirtual ? Gruv.bg0 : Color.black).cgColor   // matches NotchRoot's neck band
         layoutBody()
         let target = pinned ? frame(size: savedSize, g) : w.frame   // unpinned: drop where it was left
         if !w.isVisible || moved { w.setFrame(sliver(target, g), display: false) }
@@ -283,7 +282,7 @@ final class ScratchWindowController: NSObject, NSWindowDelegate, NSTextViewDeleg
 
     private func layoutBody() {
         guard let c = window?.contentView, let b = band, let scroll = textView?.enclosingScrollView else { return }
-        let neck = geo?.neck ?? 0
+        let neck: CGFloat = 0   // band kept at zero height: the window starts below the bar
         b.frame = NSRect(x: 0, y: c.bounds.height - neck, width: c.bounds.width, height: neck)
         // The text stops above a 30pt strip that holds the buttons: overlapping the text view made it
         // reset the cursor on every mouse move, so the grab handle's hand kept flickering back.
