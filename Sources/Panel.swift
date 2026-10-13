@@ -884,7 +884,7 @@ final class PanelController {
             me.updatePolling(forTab: me.state.tab)   // after the phase flips: isOpen is false until grow's next-tick hop
         }
         panel.makeKeyAndOrderFront(nil)
-        if state.tab == .memes || state.tab == .clipboard { NSApp.activate(ignoringOtherApps: true) }   // text fields need the app active for keyboard focus
+        NSApp.activate(ignoringOtherApps: true)   // every tab: Esc only reaches the local key monitor while Kajo is active; hide() hands focus back
         installMonitors()
     }
 
