@@ -88,6 +88,13 @@ let menuBarEnabled = (appConfig["menuBarIcon"] as? Bool) ?? true
 let notchHover = (appConfig["notchHover"] as? Bool) ?? true
 // Live hours + now-playing "ears" flanking the notch on the collapsed island (notched screens only).
 let islandEars = (appConfig["islandEars"] as? Bool) ?? true
+// Scratch notepad: "scratchFontSize": 13 and "scratchSize": [1300, 660] (points; the default size,
+// a hand resize is remembered separately and the reset button returns to this).
+let scratchFontSize = CGFloat((appConfig["scratchFontSize"] as? Double) ?? 13)
+let scratchSize: NSSize = {
+    if let a = appConfig["scratchSize"] as? [Double], a.count == 2, a[0] > 0, a[1] > 0 { return NSSize(width: a[0], height: a[1]) }
+    return NSSize(width: 1300, height: 660)
+}()
 
 // MARK: - Launch another app + dismiss the panel
 

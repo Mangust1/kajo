@@ -118,7 +118,7 @@ open -g "kajo://terminal"       # toggle the drop-down terminal (pinned to its S
 
 # 3. configure (optional) — GUI editor for ~/.config/kajo/*.json
 open "kajo://config"            # or the menu-bar Settings… item
-open "kajo://scratch"           # toggle the always-on-top scratch notepad (~/.config/kajo/scratch.txt)
+open "kajo://scratch"           # toggle the scratch notepad that drops from the notch (~/.config/kajo/scratch.txt)
 ```
 
 - **Signing:** the Makefile signs with `SIGN_ID := Kajo Self-Signed`. Create your own cert by that name, or set `SIGN_ID := -` for ad-hoc signing.
@@ -127,6 +127,8 @@ open "kajo://scratch"           # toggle the always-on-top scratch notepad (~/.c
 - **Optional configs:** `~/.config/kajo/{unifi,ha,pi}.json` (mode 600). Absent = that tab shows "No config".
 
 ## Status
+
+v0.35.0 — **Scratch drops from the notch**: the notepad is a borderless window pinned top-centre on the notch of the screen under the mouse (black neck band, bg0 on a virtual notch), slides down out of it and back up on close, Soppi-style orange frame (dimmed while another window is key), rounded bottom corners. Edge-resizable (size remembered), a grab handle at the bottom right drags it anywhere, the reset icon / ⌘0 pins it back at the default size. `scratchSize` ([1300, 660]) and `scratchFontSize` (13) in `config.json`. The hover peek row gains a Scratch icon that opens the notepad instead of the panel.
 
 v0.34.6 — The collapsed island follows the menu bar: a game or fullscreen app that hides it (system-wide `hideMenuBar`, or a fullscreen space on a notchless display) takes the pill with it, back when the bar returns. On a virtual notch the ears centre as a group, so a lone ear sits mid-pill. 0.34.1–0.34.5: pill in the bar colour, one-click ears, same target toggles closed, no blink on close.
 

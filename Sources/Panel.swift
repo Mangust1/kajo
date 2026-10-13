@@ -104,14 +104,24 @@ struct PanelView: View {
 // MARK: - Rail icon with hover state
 
 struct RailIcon: View {
-    let tab: Tab
+    let symbol: String
+    let title: String
     let isActive: Bool
     let action: () -> Void
     @State private var hovering = false
 
+    init(tab: Tab, isActive: Bool, action: @escaping () -> Void) {
+        self.init(symbol: tab.symbol, title: tab.title, isActive: isActive, action: action)
+    }
+
+    /// Non-tab launcher (the peek row's Scratch icon).
+    init(symbol: String, title: String, isActive: Bool = false, action: @escaping () -> Void) {
+        self.symbol = symbol; self.title = title; self.isActive = isActive; self.action = action
+    }
+
     var body: some View {
         Button(action: action) {
-            Image(systemName: tab.symbol)
+            Image(systemName: symbol)
                 .font(.system(size: 16, weight: .medium))
                 .frame(width: 40, height: 40)
                 .background(
@@ -121,7 +131,7 @@ struct RailIcon: View {
                 .foregroundStyle(isActive ? Gruv.aqua : Gruv.fg4)
         }
         .buttonStyle(.plain)
-        .help(tab.title)
+        .help(title)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
         .animation(.easeOut(duration: 0.12), value: isActive)
@@ -227,7 +237,7 @@ final class NotchModel: ObservableObject {
             if virtual { return CGSize(width: hasEars ? max(Self.minPill, notchWidth + leftEar + rightEar) : 0, height: neck) }   // no ears: no pill
             return CGSize(width: notchWidth + leftEar + rightEar + flare, height: neck)
         case .peek:
-            let row = CGFloat(peekTabs.count) * Self.peekCell + 24
+            let row = CGFloat(peekTabs.count + 1) * Self.peekCell + 24   // + the Scratch icon
             let island = notchWidth + 2 * max(leftEar, rightEar) + flare   // ears stay inside the neck band
             return CGSize(width: max(notchWidth + 2 * 112, row + flare, island), height: neck + 44)
         case .expanded:  return CGSize(width: Self.panelSize.width + flare, height: neck + Self.panelSize.height)
@@ -310,6 +320,7 @@ struct NotchRoot: View {
     let nowPlaying: NowPlayingModel
     let pick: (Tab) -> Void
     let openTerminal: () -> Void
+    let openScratch: () -> Void
 
     var body: some View {
         let phase = notch.phase
@@ -373,6 +384,9 @@ struct NotchRoot: View {
                     .scaleEffect(NotchModel.peekCell / 40)
                     .frame(width: NotchModel.peekCell, height: NotchModel.peekCell)
             }
+            RailIcon(symbol: "note.text", title: "Scratch", action: openScratch)
+                .scaleEffect(NotchModel.peekCell / 40)
+                .frame(width: NotchModel.peekCell, height: NotchModel.peekCell)
         }
         .frame(height: 44)
     }
@@ -598,7 +612,8 @@ final class PanelController {
                              panel: PanelView(state: state, weather: weather, events: events, timer: timer, nowPlaying: nowPlaying, sound: sound, bluetooth: bluetooth, power: power, network: network, unifi: unifi, vpn: vpn, ha: ha, pi: pi, ai: ai, system: system, memes: memes, clipboard: clipboard, currency: currency, hours: hours, severa: severa),
                              hours: hours, claude: claude, nowPlaying: nowPlaying,
                              pick: { [weak self] in self?.toggle(tab: $0) },   // ear or peek icon: open that tab; the same ear again closes
-                             openTerminal: { NSWorkspace.shared.open(URL(string: "soppi://toggle")!) })   // the Claude panes live in Soppi now (Kajo's own terminal is dormant)
+                             openTerminal: { NSWorkspace.shared.open(URL(string: "soppi://toggle")!) },   // the Claude panes live in Soppi now (Kajo's own terminal is dormant)
+                             openScratch: { [weak self] in self?.collapse(); ScratchWindowController.shared.toggle() })
         let hosting = FirstMouseHostingView(rootView: root)   // ear/peek clicks must work on the first click (the island is never key)
         hosting.sizingOptions = []                   // the controller owns the window size, not SwiftUI
         let container = NSView()                     // plain container so the tracking area isn't SwiftUI's to manage
