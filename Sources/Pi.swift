@@ -22,6 +22,20 @@ struct PiContainer: Identifiable, Codable, Equatable {
     var health: String?        // healthy, unhealthy, starting, or nil
 }
 
+// Vahti's `clickup` module: open tasks assigned to me, soonest due first.
+struct PiTask: Identifiable, Codable, Equatable {
+    var id: String { url.isEmpty ? name : url }
+    var name: String
+    var label: String          // ready-made one-liner, e.g. "overdue 1 d · to do · high"
+    var url: String
+    var days: Int?             // days until due; negative = overdue, nil = no due date
+}
+
+struct PiClickUp: Codable, Equatable {
+    var summary: String
+    var tasks: [PiTask]
+}
+
 struct PiStatus: Codable, Equatable {
     var reachable = false
     var source = ""            // "lan" (live) or "cloud" (S3 snapshot via CloudFront)
@@ -40,6 +54,7 @@ struct PiStatus: Codable, Equatable {
     var powerW: Double? = nil      // estimated, not measured — Pi 4 has no sensor
     var load: [Double] = []
     var containers: [PiContainer] = []
+    var clickup: PiClickUp? = nil  // absent when Vahti's clickup module is off
 }
 
 final class PiModel: ObservableObject {
@@ -168,6 +183,17 @@ final class PiModel: ObservableObject {
                                 health: $0["health"] as? String)
                 }
             }
+            if let cu = j["clickup"] as? [String: Any] {
+                let ts = cu["tasks"] as? [[String: Any]] ?? []
+                s.clickup = PiClickUp(
+                    summary: cu["summary"] as? String ?? "",
+                    tasks: ts.prefix(10).map {
+                        PiTask(name: $0["name"] as? String ?? "?",
+                               label: $0["label"] as? String ?? "",
+                               url: $0["url"] as? String ?? "",
+                               days: $0["days"] as? Int)
+                    })
+            }
             completion(s)
         }.resume()
     }
@@ -191,6 +217,7 @@ struct PiTab: View {
                     }
                     metrics(s)
                     if !s.containers.isEmpty { containerList(s) }
+                    if let cu = s.clickup { clickupList(cu) }
                 }
                 .padding(.bottom, 8)
                 .opacity(s.reachable ? 1 : 0.55)      // dim stale data when offline
@@ -322,6 +349,33 @@ struct PiTab: View {
                 }
                 .font(.callout)
                 .padding(.vertical, 3)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private func clickupList(_ cu: PiClickUp) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text("ClickUp").font(.caption.weight(.semibold)).foregroundStyle(Gruv.yellow)
+                Spacer()
+                Text(cu.summary).font(.caption2).foregroundStyle(Gruv.gray)
+            }
+            ForEach(cu.tasks) { t in
+                Button { AppLauncher.openURL(t.url) } label: {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(t.name).foregroundStyle(Gruv.fg1).lineLimit(1)
+                        Text(t.label).font(.caption)
+                            .foregroundStyle((t.days ?? 0) < 0 ? Gruv.red : Gruv.gray)
+                            .lineLimit(1)
+                    }
+                    .font(.callout)
+                    .padding(.vertical, 3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(t.url.isEmpty)
             }
         }
         .padding(.top, 2)
