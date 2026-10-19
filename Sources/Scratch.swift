@@ -123,6 +123,7 @@ final class ScratchWindowController: NSObject, NSWindowDelegate, NSTextViewDeleg
     private var frameLayer: CALayer?
     private static let toolStrip: CGFloat = 30 // bottom strip for the grab handle + reset, outside the text view
     private var pinned = true                  // false: unpinned from the notch, drag the band to move it
+    private var unpinnedFrame: NSRect?         // full frame at hide time; w.frame is the 2 pt sliver by the next show
     private var animGen = 0                    // drops completions of interrupted animations
     private var animating = false
     private var pendingSave: DispatchWorkItem?
@@ -190,7 +191,8 @@ final class ScratchWindowController: NSObject, NSWindowDelegate, NSTextViewDeleg
         let moved = geo.map { $0.notchRect != g.notchRect } ?? true
         geo = g; screen = s
         layoutBody()
-        let target = pinned ? frame(size: savedSize, g) : w.frame   // unpinned: drop where it was left
+        var target = pinned ? frame(size: savedSize, g) : (unpinnedFrame ?? w.frame)   // unpinned: drop where it was left
+        if target.height <= Self.minSize.height { target = frame(size: savedSize, g) }   // never reopen as a strip
         if !w.isVisible || moved { w.setFrame(sliver(target, g), display: false) }
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -203,6 +205,7 @@ final class ScratchWindowController: NSObject, NSWindowDelegate, NSTextViewDeleg
     private func hide() {
         guard let w = window, w.isVisible, let g = geo else { return }
         save()
+        if !animating { unpinnedFrame = w.frame }   // mid-show frame would be half-way
         animate(w, to: sliver(w.frame, g)) { w.orderOut(nil) }
     }
 

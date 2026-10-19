@@ -128,6 +128,7 @@ open "kajo://scratch"           # toggle the scratch notepad that drops from the
 
 ## Status
 
+v0.36.1 — Scratch reopens at its full size after being dragged off the notch (it came back as a 2 pt orange line).
 v0.36.0 — Pi tab lists **ClickUp tasks** when the health endpoint returns a top-level `clickup` object (summary header, up to 10 tasks with a one-line label, overdue labels in red; click opens the task in the browser). No `clickup` key = no section.
 v0.35.1 — Scratch no longer remembers its collapsed start frame as the size (opened as a 120 pt strip after install).
 v0.35.2 — Power tab (percent, draining wattage, time left) froze when the panel opened straight onto it: polling started one runloop tick before the island counted as open, so it was stopped instead. Same path for every polled tab since the notch island.
