@@ -83,6 +83,8 @@ let configFiles: [ConfigFile] = [
             Field(key: "notchHover", label: "Expand from the notch on hover", kind: .toggle),
             Field(key: "islandEars", label: "Hours + now playing beside the notch", kind: .toggle),
             Field(key: "enabledModules", label: "Enabled tabs", kind: .modules),
+            Field(key: "berylSSID", label: "Travel router Wi-Fi (Network tab)", kind: .text("GL-MT3600BE")),
+            Field(key: "berylScript", label: "Travel router script", kind: .text("~/Oma/claude/travel/beryl-up.sh")),
         ],
         template: """
         {

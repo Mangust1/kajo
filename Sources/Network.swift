@@ -40,6 +40,9 @@ final class NetworkModel: ObservableObject {
             activeService = c.activeService; networks = c.networks
             speedDown = c.speedDown; speedUp = c.speedUp; speedPing = c.speedPing; speedNet = c.speedNet
         }
+        // The Beryl script waits (portal login, repeater pick) without a timeout; don't orphan it on quit.
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
+                                               object: nil, queue: nil) { [weak self] _ in self?.berylProc?.terminate() }
     }
 
     private func saveCache() {
@@ -82,6 +85,45 @@ final class NetworkModel: ObservableObject {
         let engine = speedEngine == .ookla ? "Ookla speed test" : "Apple speed test"
         func v(_ s: String) -> String { s.isEmpty ? "—" : s }
         return "\(engine)\ndown: \(v(speedDown))  up: \(v(speedUp))  ping: \(v(speedPing))"
+    }
+
+    // Travel router (config berylSSID/berylScript): latest "▸" line of the running script,
+    // nil result while idle/running, then true/false until the next refresh.
+    @Published var berylRunning = false
+    @Published var berylLine = ""
+    @Published var berylOK: Bool?
+    private var berylProc: Process?
+
+    func runBeryl() {
+        guard !berylRunning else { return }
+        berylRunning = true; berylLine = ""; berylOK = nil
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = [berylScript]
+        p.environment = ProcessInfo.processInfo.environment.merging(["BERYL_SSID": berylSSID]) { $1 }
+        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
+        let h = pipe.fileHandleForReading
+        var buf = Data()
+        h.readabilityHandler = { [weak self] fh in
+            buf.append(fh.availableData)
+            while let nl = buf.firstIndex(of: 0x0a) {
+                let line = String(decoding: buf.subdata(in: buf.startIndex..<nl), as: UTF8.self)
+                buf.removeSubrange(buf.startIndex...nl)
+                // strip ANSI colour escapes, keep only the script's "▸ message" progress lines
+                let plain = line.replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression)
+                guard plain.hasPrefix("▸ ") else { continue }
+                let msg = String(plain.dropFirst(2))
+                DispatchQueue.main.async { self?.berylLine = msg }
+            }
+        }
+        p.terminationHandler = { [weak self] proc in
+            h.readabilityHandler = nil
+            DispatchQueue.main.async {
+                self?.berylRunning = false; self?.berylOK = proc.terminationStatus == 0; self?.berylProc = nil
+            }
+        }
+        do { try p.run() } catch { berylRunning = false; berylOK = false; return }
+        berylProc = p
     }
 
     private let dev = "en0"           // Wi-Fi interface on this Mac
@@ -163,6 +205,7 @@ final class NetworkModel: ObservableObject {
                 self.order = ord
                 self.wifiFirst = ord.first == self.wifiService
                 self.activeService = active
+                if !self.berylRunning { self.berylOK = nil }   // "online"/"failed" lasts until the next refresh
                 // Drop the cached speed result if we're on a different connection now.
                 if !self.speedDown.isEmpty, self.speedNet != self.netFingerprint {
                     self.speedDown = ""; self.speedUp = ""; self.speedPing = ""; self.speedNet = ""
@@ -385,6 +428,8 @@ struct NetworkTab: View {
                             .labelsHidden().toggleStyle(.switch).tint(Gruv.green)
                     }
 
+                    if !berylSSID.isEmpty { berylRow }
+
                     CopyableIPRow(label: "Wi-Fi IP", value: model.ip)
                     if !model.lanIP.isEmpty {
                         CopyableIPRow(label: "LAN IP", value: model.lanIP)
@@ -399,6 +444,34 @@ struct NetworkTab: View {
 
             Divider().overlay(Gruv.bg3)
             speedtest
+        }
+    }
+
+    private var berylRow: some View {
+        let connected = model.ssid == berylSSID
+        let inRange = model.networks.contains { $0.ssid == berylSSID }
+        let failed = !model.berylRunning && model.berylOK == false
+        let caption = model.berylRunning ? (model.berylLine.isEmpty ? "starting…" : model.berylLine)
+            : model.berylOK == true ? "online" : failed ? "failed"
+            : connected ? "connected" : inRange ? "in range" : "not in range"
+        return HStack(spacing: 11) {
+            Image(systemName: "antenna.radiowaves.left.and.right")
+                .font(.system(size: 16))
+                .foregroundStyle(connected ? Gruv.green : inRange ? Gruv.yellow : Gruv.fg4)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Beryl").foregroundStyle(Gruv.fg1)
+                Text(caption).font(.caption).foregroundStyle(failed ? Gruv.red : Gruv.gray).lineLimit(1)
+            }
+            Spacer()
+            Button { model.runBeryl() } label: {
+                HStack(spacing: 5) {
+                    if model.berylRunning { ProgressView().controlSize(.small) }
+                    Text("Connect")
+                }
+                .font(.callout.weight(.medium)).foregroundStyle(Gruv.aqua)
+            }
+            .buttonStyle(.plain).disabled(model.berylRunning)
         }
     }
 

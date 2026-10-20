@@ -4,5 +4,7 @@
   "notchHover": true,
   "islandEars": true,
   "scratchFontSize": 13,
-  "scratchSize": [1300, 660]
+  "scratchSize": [1300, 660],
+  "berylSSID": "",
+  "berylScript": "~/Oma/claude/travel/beryl-up.sh"
 }

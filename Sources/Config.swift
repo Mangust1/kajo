@@ -96,6 +96,11 @@ let scratchSize: NSSize = {
     return NSSize(width: 1300, height: 660)
 }()
 
+// Network tab travel-router row: "berylSSID" is the router's own Wi-Fi ("" = row hidden),
+// "berylScript" the join + captive-portal helper it runs (tilde-expanded).
+let berylSSID = (appConfig["berylSSID"] as? String) ?? ""
+let berylScript = NSString(string: (appConfig["berylScript"] as? String) ?? "~/Oma/claude/travel/beryl-up.sh").expandingTildeInPath
+
 // MARK: - Launch another app + dismiss the panel
 
 extension Notification.Name {
