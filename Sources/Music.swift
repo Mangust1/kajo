@@ -751,6 +751,7 @@ struct PlaylistsPanel: View {
                 Spacer()
                 if web.playlistsLoading || busy { ProgressView().controlSize(.small) }
             }
+            .padding(.top, 10)   // breathing room under the tab's title row
             if web.canReadPlaylists {
                 HStack(spacing: 8) {
                     Image(systemName: "line.3.horizontal.decrease").font(.caption).foregroundStyle(Gruv.fg4)
