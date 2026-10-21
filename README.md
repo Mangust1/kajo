@@ -128,6 +128,7 @@ open "kajo://scratch"           # toggle the scratch notepad that drops from the
 
 ## Status
 
+v0.37.1 — Power tab: the "Draining at" wattage updates every second on battery. It reads the SMC battery-power key (PPBR) instead of the battery's amperage, which macOS only refreshes once a minute. Charging still shows the battery-reported figure.
 v0.37.0 — Network tab: optional **travel-router row** under Wi-Fi (`berylSSID` in `config.json`, "" = hidden). The antenna is green when connected to the router's Wi-Fi, yellow when it's in the last scan, grey otherwise; **Connect** runs `berylScript` (default `~/Oma/claude/travel/beryl-up.sh`), the caption follows its `▸` progress lines and ends on "online" or a red "failed".
 v0.36.1 — Scratch reopens at its full size after being dragged off the notch (it came back as a 2 pt orange line).
 v0.36.0 — Pi tab lists **ClickUp tasks** when the health endpoint returns a top-level `clickup` object (summary header, up to 10 tasks with a one-line label, overdue labels in red; click opens the task in the browser). No `clickup` key = no section.

@@ -43,8 +43,15 @@ final class PowerModel: ObservableObject {
         var i = PowerInfo()
         readPowerSources(into: &i)
         readSmartBattery(into: &i)
+        // AppleSmartBattery's InstantAmperage only refreshes every 60 s; the SMC's
+        // PPBR (battery output, W, positive while discharging) is live. Charging keeps
+        // the registry figure: PPBR's sign on AC is unverified (PDTR − PSTR is the
+        // candidate upgrade once measured on the adapter).
+        if !i.onAC, let w = smc.readFloat("PPBR") { i.batteryWatts = -Double(w) }
         info = i
     }
+
+    private let smc = SMCReader()
 
     private func readPowerSources(into i: inout PowerInfo) {
         guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
@@ -82,6 +89,46 @@ final class PowerModel: ObservableObject {
                                                          kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any] {
             i.adapterWatts = (adapter["Watts"] as? Int) ?? 0
         }
+    }
+}
+
+/// Minimal unprivileged AppleSMC reader (the Stats/smctemp way): selector 2 with the
+/// 80-byte C `SMCKeyData_t` as a raw buffer — key@0, keyInfo.dataSize@28,
+/// dataType@32, result@40, data8 (command)@42, bytes@48. Only `flt ` keys are decoded.
+private final class SMCReader {
+    private var conn: io_connect_t = 0
+
+    init() {
+        let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"))
+        guard svc != 0 else { return }
+        defer { IOObjectRelease(svc) }
+        if IOServiceOpen(svc, mach_task_self_, 0, &conn) != kIOReturnSuccess { conn = 0 }
+    }
+
+    deinit { if conn != 0 { IOServiceClose(conn) } }
+
+    func readFloat(_ key: String) -> Float? {
+        guard conn != 0 else { return nil }
+        var buf = [UInt8](repeating: 0, count: 80)
+        put32(&buf, 0, key.utf8.reduce(0) { $0 << 8 | UInt32($1) })
+        buf[42] = 9                                   // read key info
+        guard let info = call(buf), info[40] == 0,
+              get32(info, 28) == 4, get32(info, 32) == 0x666C_7420 else { return nil }   // 'flt '
+        put32(&buf, 28, 4)
+        buf[42] = 5                                   // read bytes
+        guard let data = call(buf), data[40] == 0 else { return nil }
+        return Float(bitPattern: get32(data, 48))
+    }
+
+    private func call(_ input: [UInt8]) -> [UInt8]? {
+        var inp = input, out = [UInt8](repeating: 0, count: 80), size = 80
+        return IOConnectCallStructMethod(conn, 2, &inp, 80, &out, &size) == kIOReturnSuccess ? out : nil
+    }
+    private func put32(_ b: inout [UInt8], _ off: Int, _ v: UInt32) {
+        withUnsafeBytes(of: v) { for (k, x) in $0.enumerated() { b[off + k] = x } }
+    }
+    private func get32(_ b: [UInt8], _ off: Int) -> UInt32 {
+        b[off..<off + 4].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
     }
 }
 
