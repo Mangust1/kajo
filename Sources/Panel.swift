@@ -72,8 +72,9 @@ struct PanelView: View {
                     .foregroundStyle(Gruv.fg1)
                 Spacer()
                 if state.tab == .music, let web = nowPlaying.web {
+                    SlideOverButton(model: nowPlaying, web: web, kind: .search, symbol: "magnifyingglass", help: "Search")
                     DevicesButton(model: nowPlaying, web: web)
-                    PlaylistsButton(model: nowPlaying, web: web)
+                    SlideOverButton(model: nowPlaying, web: web, kind: .playlists, symbol: "music.note.list", help: "Playlists")
                 }
             }
             .padding(.horizontal, 18)
@@ -105,10 +106,14 @@ struct PanelView: View {
 
             Spacer()
             }
-            // Music: the playlists slide-over covers the tab body (title row and its toggle stay visible).
+            // Music: the search / playlists slide-over covers the tab body (title row and its toggles stay visible).
             .overlay {
-                if state.tab == .music, nowPlaying.showPlaylists, let web = nowPlaying.web {
-                    PlaylistsPanel(model: nowPlaying, web: web).transition(.move(edge: .trailing))
+                if state.tab == .music, let web = nowPlaying.web {
+                    switch nowPlaying.slideOver {
+                    case .playlists: PlaylistsPanel(model: nowPlaying, web: web).transition(.move(edge: .trailing))
+                    case .search:    SearchPanel(model: nowPlaying, web: web).transition(.move(edge: .trailing))
+                    case nil:        EmptyView()
+                    }
                 }
             }
             .clipped()
@@ -948,8 +953,8 @@ final class PanelController {
             if event.keyCode == 53 {                                            // Esc
                 if self.state.tab == .memes, self.memes.editingMeme != nil { self.memes.editingMeme = nil; return nil }
                 if self.state.tab == .music, self.nowPlaying.showDevices { self.nowPlaying.showDevices = false; return nil }   // device popover first
-                if self.state.tab == .music, self.nowPlaying.showPlaylists {             // Esc closes the playlists slide-over first
-                    withAnimation(.spring(duration: 0.3)) { self.nowPlaying.showPlaylists = false }; return nil
+                if self.state.tab == .music, self.nowPlaying.slideOver != nil {          // Esc closes the search / playlists slide-over first
+                    self.nowPlaying.closeSlideOver(); return nil
                 }
                 self.hide(); return nil
             }

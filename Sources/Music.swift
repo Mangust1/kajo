@@ -33,7 +33,8 @@ final class NowPlayingModel: ObservableObject {
     @Published var restarting = false
     @Published var volume: Double?        // 0…1, spotifyd only (its hook exports VOLUME 0…65535)
     @Published var upNext: [SpotifyWeb.QueueItem] = []   // spotifyd only: the play queue (up to ~20)
-    @Published var showPlaylists = false   // spotifyd only: the playlists slide-over is open (Esc closes it first)
+    enum SlideOver { case playlists, search }
+    @Published var slideOver: SlideOver?   // spotifyd only: the open slide-over, one at a time (Esc closes it first)
     @Published var showDevices = false     // spotifyd only: the device picker popover is open (Esc closes it first)
     /// spotifyd mode: never AppleScript, launch or restart Spotify.app; controls go through the Web API.
     let spotifyd = musicSource == "spotifyd"
@@ -145,9 +146,19 @@ final class NowPlayingModel: ObservableObject {
     func playQueued(_ index: Int) { web?.skip(index + 1) }
 
     /// "Play next": add the row's item to the user queue, then re-read the queue (Spotify lags ~1 s).
-    func playNext(_ item: SpotifyWeb.QueueItem) {
-        web?.addToQueue(item.uri) { [weak self] ok in if ok { self?.refreshQueue(after: 1) } }
+    func playNext(_ item: SpotifyWeb.QueueItem) { enqueue(item.uri) }
+
+    /// Add `uri` to the user queue; on success re-read the queue (Spotify lags ~1 s). Errors → web.caption.
+    func enqueue(_ uri: String, done: @escaping (Bool) -> Void = { _ in }) {
+        web?.addToQueue(uri) { [weak self] ok in
+            if ok { self?.refreshQueue(after: 1) }
+            done(ok)
+        }
     }
+
+    /// Open `s`, or close it when it is already the open one.
+    func toggleSlideOver(_ s: SlideOver) { withAnimation(.spring(duration: 0.3)) { slideOver = slideOver == s ? nil : s } }
+    func closeSlideOver() { withAnimation(.spring(duration: 0.3)) { slideOver = nil } }
 
     /// Device picker row click: transfer playback there, then re-read the queue (Spotify lags ~1 s).
     func transferPlayback(to d: SpotifyWeb.Device) {
@@ -586,15 +597,11 @@ struct UpNextList: View {
     var body: some View {
         if web.hasToken, !model.upNext.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    Text("UP NEXT").font(.caption2.weight(.semibold)).tracking(1).foregroundStyle(Gruv.gray)
-                    Rectangle().fill(Gruv.bg2).frame(height: 1)
-                }
-                .padding(.horizontal, 6)   // text lines up with the thumbnails below
+                SectionHeader(text: "UP NEXT")
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(Array(model.upNext.enumerated()), id: \.offset) { i, item in
-                            UpNextRow(item: item) { model.playQueued(i) }
+                            MediaRow(title: item.title, detail: item.artist, imageURL: item.imageURL, hoverSymbol: "forward.end.fill") { model.playQueued(i) }
                                 .contextMenu {
                                     Button("Play next") { model.playNext(item) }.disabled(item.uri.isEmpty)
                                     Button("Play now") { model.playQueued(i) }
@@ -671,9 +678,11 @@ private struct LinkTextField: NSViewRepresentable {
     let placeholder: String
     var onSubmit: (String) -> Bool
     var onChange: ((String) -> Void)? = nil   // every edit (the playlists filter)
+    var autoFocus = false                      // first responder as soon as it is in a window (search)
 
     func makeNSView(context: Context) -> NSTextField {
-        let tf = NSTextField()
+        let tf = FocusingTextField()
+        tf.autoFocus = autoFocus
         tf.isBordered = false
         tf.drawsBackground = false
         tf.focusRingType = .none
@@ -692,6 +701,15 @@ private struct LinkTextField: NSViewRepresentable {
     }
     func makeCoordinator() -> Coordinator { Coordinator(onSubmit: onSubmit, onChange: onChange) }
 
+    final class FocusingTextField: NSTextField {
+        var autoFocus = false
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard autoFocus, window != nil else { return }
+            DispatchQueue.main.async { [weak self] in self?.window?.makeFirstResponder(self) }   // after the slide-in's layout pass
+        }
+    }
+
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var onSubmit: (String) -> Bool
         var onChange: ((String) -> Void)?
@@ -707,25 +725,31 @@ private struct LinkTextField: NSViewRepresentable {
     }
 }
 
-private struct UpNextRow: View {
-    let item: SpotifyWeb.QueueItem
+/// One list row in the UpNextRow look: 36 pt thumb (round for artists), title, caption, a symbol on hover.
+/// Used by Up next, Playlists and Search.
+private struct MediaRow: View {
+    let title: String
+    let detail: String
+    let imageURL: String
+    var round = false
+    let hoverSymbol: String
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
-                QueueThumb(url: item.imageURL)
+                QueueThumb(url: imageURL, round: round)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(item.title).font(.callout.weight(.medium)).foregroundStyle(Gruv.fg1)
+                    Text(title).font(.callout.weight(.medium)).foregroundStyle(Gruv.fg1)
                         .lineLimit(1).truncationMode(.tail)
-                    if !item.artist.isEmpty {
-                        Text(item.artist).font(.caption).foregroundStyle(Gruv.gray)
+                    if !detail.isEmpty {
+                        Text(detail).font(.caption).foregroundStyle(Gruv.gray)
                             .lineLimit(1).truncationMode(.tail)
                     }
                 }
                 Spacer(minLength: 4)
-                Image(systemName: "forward.end.fill").font(.caption).foregroundStyle(Gruv.fg4)
+                Image(systemName: hoverSymbol).font(.caption).foregroundStyle(Gruv.fg4)
                     .opacity(hovering ? 1 : 0)
             }
             .padding(6)
@@ -737,20 +761,35 @@ private struct UpNextRow: View {
     }
 }
 
-/// Header-row button (Panel.swift, Music tab title row): toggles the playlists slide-over.
-struct PlaylistsButton: View {
+/// Small caps list header with a rule ("UP NEXT", search sections).
+private struct SectionHeader: View {
+    let text: String
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(text).font(.caption2.weight(.semibold)).tracking(1).foregroundStyle(Gruv.gray)
+            Rectangle().fill(Gruv.bg2).frame(height: 1)
+        }
+        .padding(.horizontal, 6)   // text lines up with the thumbnails below
+    }
+}
+
+/// Header-row button (Panel.swift, Music tab title row): toggles one slide-over (search, playlists).
+struct SlideOverButton: View {
     @ObservedObject var model: NowPlayingModel
     @ObservedObject var web: SpotifyWeb
+    let kind: NowPlayingModel.SlideOver
+    let symbol: String
+    let help: String
 
     var body: some View {
         if web.hasToken {
-            Button { withAnimation(.spring(duration: 0.3)) { model.showPlaylists.toggle() } } label: {
-                Image(systemName: "music.note.list").font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(model.showPlaylists ? Gruv.aqua : Gruv.fg4)
+            Button { model.toggleSlideOver(kind) } label: {
+                Image(systemName: symbol).font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(model.slideOver == kind ? Gruv.aqua : Gruv.fg4)
                     .frame(width: 26, height: 22).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Playlists")
+            .help(help)
         }
     }
 }
@@ -906,8 +945,64 @@ private struct DeviceRow: View {
     }
 }
 
-/// spotifyd mode: the user's playlists, sliding in from the right over the Music tab (Panel.swift
-/// overlays it). Click = play on the configured device and close; right-click = Play / Shuffle play / Copy link.
+/// Chrome shared by the Music tab's slide-overs (Panel.swift overlays them from the right):
+/// back chevron, title + accessory, spinner, the content, and web.caption errors at the bottom.
+private struct SlideOverPanel<Accessory: View, Content: View>: View {
+    @ObservedObject var model: NowPlayingModel
+    @ObservedObject var web: SpotifyWeb
+    let title: String
+    let busy: Bool
+    @ViewBuilder var accessory: Accessory
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Button { model.closeSlideOver() } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 13, weight: .semibold)).foregroundStyle(Gruv.fg2)
+                        .frame(width: 22, height: 22).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Gruv.fg1)
+                accessory
+                Spacer()
+                if busy { ProgressView().controlSize(.small) }
+            }
+            .padding(.top, 10)   // breathing room under the tab's title row
+            content
+            if !web.caption.isEmpty {
+                Text(web.caption).font(.caption).foregroundStyle(Gruv.orange).lineLimit(2)
+            }
+        }
+        .padding(.horizontal, 18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Gruv.bg0)
+        .overlay(alignment: .leading) { Rectangle().fill(Gruv.bg3.opacity(0.4)).frame(width: 1) }
+        .shadow(color: .black.opacity(0.35), radius: 8, x: -3)
+    }
+}
+
+/// Rounded bg1 field row (icon + AppKit text field) used by the slide-overs' filter/search fields.
+private struct FieldBox<Content: View>: View {
+    let symbol: String
+    @ViewBuilder var content: Content
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol).font(.caption).foregroundStyle(Gruv.fg4)
+            content
+        }
+        .padding(.vertical, 7).padding(.horizontal, 10)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Gruv.bg1))
+    }
+}
+
+private func copyLink(_ link: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(link, forType: .string)
+}
+
+/// spotifyd mode: the user's playlists slide-over. Click = play on the configured device and close;
+/// right-click = Play / Shuffle play / Copy link.
 struct PlaylistsPanel: View {
     @ObservedObject var model: NowPlayingModel
     @ObservedObject var web: SpotifyWeb
@@ -920,39 +1015,23 @@ struct PlaylistsPanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Button { close() } label: {
-                    Image(systemName: "chevron.left").font(.system(size: 13, weight: .semibold)).foregroundStyle(Gruv.fg2)
-                        .frame(width: 22, height: 22).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                Text("Playlists").font(.system(size: 15, weight: .semibold)).foregroundStyle(Gruv.fg1)
-                if web.canReadPlaylists, !web.playlists.isEmpty {
-                    Text("\(web.playlists.count)").font(.caption.monospacedDigit()).foregroundStyle(Gruv.gray)
-                }
-                Spacer()
-                if web.playlistsLoading || busy { ProgressView().controlSize(.small) }
+        SlideOverPanel(model: model, web: web, title: "Playlists", busy: web.playlistsLoading || busy) {
+            if web.canReadPlaylists, !web.playlists.isEmpty {
+                Text("\(web.playlists.count)").font(.caption.monospacedDigit()).foregroundStyle(Gruv.gray)
             }
-            .padding(.top, 10)   // breathing room under the tab's title row
+        } content: {
             if web.canReadPlaylists {
-                HStack(spacing: 8) {
-                    Image(systemName: "line.3.horizontal.decrease").font(.caption).foregroundStyle(Gruv.fg4)
+                FieldBox(symbol: "line.3.horizontal.decrease") {
                     LinkTextField(placeholder: "Filter playlists", onSubmit: { _ in false }, onChange: { filter = $0 })
                 }
-                .padding(.vertical, 7).padding(.horizontal, 10)
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Gruv.bg1))
                 ScrollView(showsIndicators: false) {
                     LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(shown) { p in
-                            PlaylistRow(playlist: p) { play(p, shuffle: false) }
+                            MediaRow(title: p.name, detail: detail(p), imageURL: p.imageURL, hoverSymbol: "play.fill") { play(p, shuffle: false) }
                                 .contextMenu {
                                     Button("Play") { play(p, shuffle: false) }
                                     Button("Shuffle play") { play(p, shuffle: true) }
-                                    Button("Copy link") {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(p.link, forType: .string)
-                                    }
+                                    Button("Copy link") { copyLink(p.link) }
                                 }
                         }
                     }
@@ -979,62 +1058,151 @@ struct PlaylistsPanel: View {
                 .padding(.top, 20)
                 Spacer(minLength: 0)
             }
-            if !web.caption.isEmpty {
-                Text(web.caption).font(.caption).foregroundStyle(Gruv.orange).lineLimit(2)
-            }
         }
-        .padding(.horizontal, 18)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Gruv.bg0)
-        .overlay(alignment: .leading) { Rectangle().fill(Gruv.bg3.opacity(0.4)).frame(width: 1) }
-        .shadow(color: .black.opacity(0.35), radius: 8, x: -3)
         .onAppear { web.loadPlaylists() }
         .onChange(of: web.canReadPlaylists) { _, ok in if ok { web.loadPlaylists(force: true) } }
     }
 
-    private func close() { withAnimation(.spring(duration: 0.3)) { model.showPlaylists = false } }
+    private func detail(_ p: SpotifyWeb.Playlist) -> String {
+        [p.total.map { "\($0) tracks" }, p.owner.isEmpty ? nil : p.owner].compactMap { $0 }.joined(separator: " · ")
+    }
 
     private func play(_ p: SpotifyWeb.Playlist, shuffle: Bool) {
         guard !busy else { return }
         busy = true
         let done: (Bool) -> Void = { ok in
             busy = false
-            if ok { close() }   // failure: the caption above explains, panel stays
+            if ok { model.closeSlideOver() }   // failure: the caption explains, panel stays
         }
         if shuffle { web.shufflePlay(p.uri, done: done) } else { web.playContext(p.uri, done: done) }
     }
 }
 
-private struct PlaylistRow: View {
-    let playlist: SpotifyWeb.Playlist
-    let action: () -> Void
-    @State private var hovering = false
-
-    private var detail: String {
-        [playlist.total.map { "\($0) tracks" }, playlist.owner.isEmpty ? nil : playlist.owner]
-            .compactMap { $0 }.joined(separator: " · ")
-    }
+/// spotifyd mode: Spotify search slide-over. Types as you go (350 ms debounce, 2+ chars; Enter = now).
+/// Tracks: click = play next (stays open), right-click Play next / Play now / Copy link.
+/// Albums, playlists, artists: click = play now and close; right-click Play / Shuffle play / Copy link
+/// (no shuffle for artists).
+struct SearchPanel: View {
+    @ObservedObject var model: NowPlayingModel
+    @ObservedObject var web: SpotifyWeb
+    @State private var query = ""
+    @State private var results: SpotifyWeb.SearchResults?
+    @State private var searching = false
+    @State private var busy = false
+    @State private var pending: DispatchWorkItem?
+    @State private var expanded: Set<String> = []   // sections showing all rows
+    @State private var status = ""                   // green "Queued: …" line
+    @State private var clearTask: DispatchWorkItem?
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                QueueThumb(url: playlist.imageURL)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(playlist.name).font(.callout.weight(.medium)).foregroundStyle(Gruv.fg1)
-                        .lineLimit(1).truncationMode(.tail)
-                    if !detail.isEmpty {
-                        Text(detail).font(.caption).foregroundStyle(Gruv.gray).lineLimit(1).truncationMode(.tail)
+        SlideOverPanel(model: model, web: web, title: "Search", busy: searching || busy) {
+            EmptyView()
+        } content: {
+            FieldBox(symbol: "magnifyingglass") {
+                LinkTextField(placeholder: "Songs, artists, albums, playlists", onSubmit: { text in
+                    run(text, delay: 0); return false
+                }, onChange: { text in run(text, delay: 0.35) }, autoFocus: true)
+            }
+            if !status.isEmpty {
+                Text(status).font(.caption).foregroundStyle(Gruv.green).lineLimit(1)
+            }
+            if let results {
+                if results.isEmpty {
+                    muted("No results for \u{201C}\(query)\u{201D}")
+                } else {
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            section("TRACKS", results.tracks, limit: 6)
+                            section("ARTISTS", results.artists, limit: 4)
+                            section("ALBUMS", results.albums, limit: 4)
+                            section("PLAYLISTS", results.playlists, limit: 4)
+                        }
+                        .padding(.bottom, 10)
                     }
                 }
-                Spacer(minLength: 4)
-                Image(systemName: "play.fill").font(.caption).foregroundStyle(Gruv.fg4).opacity(hovering ? 1 : 0)
+            } else if query.trimmingCharacters(in: .whitespaces).count < 2 {
+                muted("Type at least two characters")
             }
-            .padding(6)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hovering ? Gruv.bg1 : .clear))
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
+        .onDisappear { pending?.cancel() }
+    }
+
+    private func muted(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(Gruv.gray).frame(maxWidth: .infinity).padding(.top, 12)
+    }
+
+    @ViewBuilder private func section(_ title: String, _ items: [SpotifyWeb.SearchItem], limit: Int) -> some View {
+        if !items.isEmpty {
+            let all = expanded.contains(title)
+            SectionHeader(text: title).padding(.top, 6)
+            ForEach(all ? items : Array(items.prefix(limit))) { item in
+                MediaRow(title: item.title, detail: item.detail, imageURL: item.imageURL, round: item.kind == "artist",
+                         hoverSymbol: item.kind == "track" ? "text.line.first.and.arrowtriangle.forward" : "play.fill") { primary(item) }
+                    .contextMenu { menu(item) }
+            }
+            if items.count > limit {
+                Button(all ? "Show less" : "Show all \(items.count)") {
+                    if all { expanded.remove(title) } else { expanded.insert(title) }
+                }
+                .buttonStyle(.plain).font(.caption).foregroundStyle(Gruv.aqua).padding(.horizontal, 6)
+            }
+        }
+    }
+
+    @ViewBuilder private func menu(_ item: SpotifyWeb.SearchItem) -> some View {
+        if item.kind == "track" {
+            Button("Play next") { queue(item) }
+            Button("Play now") { play(item, shuffle: false) }
+        } else {
+            Button("Play") { play(item, shuffle: false) }
+            if item.kind != "artist" { Button("Shuffle play") { play(item, shuffle: true) } }
+        }
+        Button("Copy link") { copyLink(item.link) }.disabled(item.link.isEmpty)
+    }
+
+    private func primary(_ item: SpotifyWeb.SearchItem) {
+        if item.kind == "track" { queue(item) } else { play(item, shuffle: false) }
+    }
+
+    /// Debounced search; `delay` 0 = Enter. Under 2 characters clears the results.
+    private func run(_ text: String, delay: Double) {
+        query = text
+        pending?.cancel()
+        let q = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard q.count >= 2 else { results = nil; searching = false; return }
+        let w = DispatchWorkItem {
+            searching = true
+            web.search(q) { r in
+                searching = false
+                guard q == query.trimmingCharacters(in: .whitespacesAndNewlines) else { return }   // field changed since (e.g. cleared)
+                if let r { results = r; expanded = [] }   // nil: api() put the error in the caption
+            }
+        }
+        pending = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: w)
+    }
+
+    private func queue(_ item: SpotifyWeb.SearchItem) {
+        model.enqueue(item.uri) { ok in
+            guard ok else { return }
+            status = "Queued: \(item.title)"
+            clearTask?.cancel()
+            let w = DispatchWorkItem { status = "" }
+            clearTask = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: w)
+        }
+    }
+
+    private func play(_ item: SpotifyWeb.SearchItem, shuffle: Bool) {
+        guard !busy else { return }
+        busy = true
+        let done: (Bool) -> Void = { ok in
+            busy = false
+            if ok { model.closeSlideOver() }   // failure: the caption explains, panel stays
+        }
+        if item.kind == "track" { web.playTrack(item.uri, done: done) }
+        else if shuffle { web.shufflePlay(item.uri, done: done) }
+        else { web.playContext(item.uri, done: done) }
     }
 }
 
@@ -1042,6 +1210,7 @@ private struct PlaylistRow: View {
 /// image, ~64 px, a few KB each, so no eviction; upgrade path: NSCache if memory ever shows it).
 private struct QueueThumb: View {
     let url: String
+    var round = false   // artists
     @State private var image: NSImage?
     private static var cache: [String: NSImage] = [:]
 
@@ -1054,7 +1223,7 @@ private struct QueueThumb: View {
             }
         }
         .frame(width: 36, height: 36)
-        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: round ? 18 : 5, style: .continuous))
         .task(id: url) { await load() }
     }
 

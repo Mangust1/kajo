@@ -305,6 +305,82 @@ final class SpotifyWeb: ObservableObject {
         }
     }
 
+    /// Play one track/episode now (`{"uris":[uri]}`) on the configured device (else the active one). Errors → caption.
+    func playTrack(_ uri: String, done: @escaping (Bool) -> Void) {
+        guard hasToken, !uri.isEmpty else { done(false); return }
+        withDeviceID { [weak self] id in
+            self?.api("PUT", "/me/player/play" + (id.map { "?device_id=\($0)" } ?? ""), json: ["uris": [uri]]) { code, _ in
+                done(code > 0 && code < 300)
+            }
+        }
+    }
+
+    // MARK: Search
+
+    /// One search hit. `kind` is track / artist / album / playlist; `detail` is the row's caption.
+    struct SearchItem: Identifiable, Equatable {
+        let kind: String; let title: String; let detail: String
+        let imageURL: String; let uri: String; let link: String
+        var id: String { uri }
+    }
+    struct SearchResults: Equatable {
+        var tracks: [SearchItem] = []; var artists: [SearchItem] = []
+        var albums: [SearchItem] = []; var playlists: [SearchItem] = []
+        var isEmpty: Bool { tracks.isEmpty && artists.isEmpty && albums.isEmpty && playlists.isEmpty }
+    }
+
+    private var searchSeq = 0
+
+    /// GET /search for tracks, artists, albums and playlists. Only the newest call's answer reaches
+    /// `done` (older ones are dropped by sequence number); nil = failed (api() set the caption).
+    // limit=10: Spotify caps search at 10 per type for development-mode apps since Feb 2026 (a 2026-10-21
+    // live search returned 10 of each). Upgrade path if the app ever gets extended quota: raise it.
+    func search(_ q: String, done: @escaping (SearchResults?) -> Void) {
+        guard hasToken else { done(nil); return }
+        searchSeq += 1
+        let seq = searchSeq
+        let enc = q.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? q
+        api("GET", "/search?q=\(enc)&type=track,album,artist,playlist&limit=10") { [weak self] code, data in
+            guard let self, seq == self.searchSeq else { return }   // stale: a newer search is in flight
+            guard code == 200, let j = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else { done(nil); return }
+            done(Self.searchResults(j))
+        }
+    }
+
+    /// /search response → SearchResults. Spotify sends null items (seen in playlists); they are skipped. Pure.
+    static func searchResults(_ j: [String: Any]) -> SearchResults {
+        func items(_ key: String) -> [[String: Any]] { ((j[key] as? [String: Any])?["items"] as? [Any] ?? []).compactMap { $0 as? [String: Any] } }
+        func thumb(_ x: [String: Any]?) -> String {
+            let imgs = (x?["images"] as? [[String: Any]]) ?? []
+            return imgs.min { ($0["width"] as? Int ?? .max) < ($1["width"] as? Int ?? .max) }?["url"] as? String ?? ""
+        }
+        func artists(_ x: [String: Any]?) -> String {
+            ((x?["artists"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }.joined(separator: ", ")
+        }
+        func item(_ x: [String: Any], kind: String, detail: String, image: String) -> SearchItem? {
+            guard let uri = x["uri"] as? String, let name = x["name"] as? String, !name.isEmpty else { return nil }
+            var link = (x["external_urls"] as? [String: Any])?["spotify"] as? String ?? ""
+            let p = uri.split(separator: ":")
+            if link.isEmpty, p.count == 3 { link = "https://open.spotify.com/\(p[1])/\(p[2])" }
+            return SearchItem(kind: kind, title: name, detail: detail, imageURL: image, uri: uri, link: link)
+        }
+        var r = SearchResults()
+        r.tracks = items("tracks").compactMap { t in
+            let album = (t["album"] as? [String: Any])
+            let d = [artists(t), album?["name"] as? String ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
+            return item(t, kind: "track", detail: d, image: thumb(album))
+        }
+        r.artists = items("artists").compactMap { item($0, kind: "artist", detail: "Artist", image: thumb($0)) }
+        r.albums = items("albums").compactMap { a in
+            let year = String((a["release_date"] as? String ?? "").prefix(4))
+            return item(a, kind: "album", detail: [artists(a), year].filter { !$0.isEmpty }.joined(separator: " · "), image: thumb(a))
+        }
+        r.playlists = items("playlists").compactMap { p in
+            item(p, kind: "playlist", detail: ((p["owner"] as? [String: Any])?["display_name"] as? String) ?? "", image: thumb(p))
+        }
+        return r
+    }
+
     // MARK: Playlists
 
     struct Playlist: Identifiable, Equatable {
@@ -506,5 +582,13 @@ func _spotifyLinkSelfCheck() {
     assert(SpotifyWeb.parseRef("hello") == nil)
     assert(SpotifyWeb.isShortLink("https://spotify.link/AbCdEf") && !SpotifyWeb.isShortLink("https://open.spotify.com/track/x"))
     assert(SpotifyWeb.refInHTML("<a href=\"https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=1\">")?.id == "4uLU6hMCjMI75M1A2tKUQC")
+    // Search parsing: null items skipped, track caption = artists · album, album caption = artists · year.
+    let sr = SpotifyWeb.searchResults([
+        "tracks": ["items": [["name": "T", "uri": "spotify:track:t1", "artists": [["name": "A"]], "album": ["name": "Al", "images": []]]]],
+        "albums": ["items": [["name": "Al", "uri": "spotify:album:a1", "release_date": "2001-05-15", "artists": [["name": "A"]]]]],
+        "playlists": ["items": [NSNull(), ["name": "P", "uri": "spotify:playlist:p1", "owner": ["display_name": "O"]]]],
+    ])
+    assert(sr.tracks.first?.detail == "A · Al" && sr.tracks.first?.link == "https://open.spotify.com/track/t1")
+    assert(sr.albums.first?.detail == "A · 2001" && sr.playlists.map(\.detail) == ["O"] && sr.artists.isEmpty)
 }
 #endif
