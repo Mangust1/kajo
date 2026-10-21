@@ -353,8 +353,26 @@ final class NowPlayingModel: ObservableObject {
             web.trackInfo(id) { [weak self] a, al in
                 guard let self, self.trackID == id else { return }
                 self.artist = a; self.album = al
+                Self.shareArtist(a, trackID: id)
             }
         }
+    }
+
+    /// Writes ARTIST + ARTIST_TRACK_ID into the spotifyd state file so SketchyBar's music item
+    /// can show the artist (spotifyd's hook doesn't export it). Merge + tmp/rename like the hook;
+    /// the dir watcher re-reads once, and infoFetchedFor stops a second fetch → no loop.
+    private static func shareArtist(_ artist: String, trackID: String) {
+        guard !artist.isEmpty else { return }
+        let path = kajoConfigDir + "/spotifyd-state.json"
+        var d = (try? Data(contentsOf: URL(fileURLWithPath: path)))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        guard (d["TRACK_ID"] as? String) == trackID else { return }
+        d["ARTIST"] = artist; d["ARTIST_TRACK_ID"] = trackID
+        guard let out = try? JSONSerialization.data(withJSONObject: d) else { return }
+        let tmp = path + ".kajo.tmp"
+        if (try? out.write(to: URL(fileURLWithPath: tmp))) != nil { _ = rename(tmp, path) }
+        let bar = "/opt/homebrew/bin/sketchybar"   // optional; launchedProcess throws (ObjC) on a missing binary
+        if FileManager.default.isExecutableFile(atPath: bar) { Process.launchedProcess(launchPath: bar, arguments: ["--trigger", "spotifyd_change"]) }
     }
 }
 
@@ -497,20 +515,79 @@ struct UpNextList: View {
     var body: some View {
         if web.hasToken, !model.upNext.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Next").font(.caption.weight(.semibold)).foregroundStyle(Gruv.yellow)
+                HStack(spacing: 8) {
+                    Text("UP NEXT").font(.caption2.weight(.semibold)).tracking(1).foregroundStyle(Gruv.gray)
+                    Rectangle().fill(Gruv.bg2).frame(height: 1)
+                }
+                .padding(.horizontal, 6)   // text lines up with the thumbnails below
                 ForEach(Array(model.upNext.enumerated()), id: \.offset) { i, item in
-                    Button { model.playQueued(i) } label: {
-                        (Text(item.title).foregroundStyle(Gruv.fg1)
-                         + Text(item.artist.isEmpty ? "" : " · " + item.artist).foregroundStyle(Gruv.gray))
-                            .font(.caption).lineLimit(1).truncationMode(.tail)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+                    UpNextRow(item: item) { model.playQueued(i) }
+                        .opacity(i == 2 ? 0.6 : 1)
                 }
             }
-            .padding(.horizontal, 24)
+            // Full width = same edges as the progress bar; the hover background reaches them.
         }
+    }
+}
+
+private struct UpNextRow: View {
+    let item: SpotifyWeb.QueueItem
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                QueueThumb(url: item.imageURL)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title).font(.callout.weight(.medium)).foregroundStyle(Gruv.fg1)
+                        .lineLimit(1).truncationMode(.tail)
+                    if !item.artist.isEmpty {
+                        Text(item.artist).font(.caption).foregroundStyle(Gruv.gray)
+                            .lineLimit(1).truncationMode(.tail)
+                    }
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "forward.end.fill").font(.caption).foregroundStyle(Gruv.fg4)
+                    .opacity(hovering ? 1 : 0)
+            }
+            .padding(6)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hovering ? Gruv.bg1 : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// 36 pt queue thumbnail. Loaded once per URL into a process-lifetime cache (the queue shows
+/// three small images, so no eviction; upgrade path: NSCache if it ever lists more).
+private struct QueueThumb: View {
+    let url: String
+    @State private var image: NSImage?
+    private static var cache: [String: NSImage] = [:]
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                Gruv.bg2.overlay(Image(systemName: "music.note").font(.caption).foregroundStyle(Gruv.fg4))
+            }
+        }
+        .frame(width: 36, height: 36)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .task(id: url) { await load() }
+    }
+
+    @MainActor private func load() async {
+        if let hit = Self.cache[url] { image = hit; return }
+        image = nil
+        guard let u = URL(string: url), !url.isEmpty,
+              let (data, _) = try? await URLSession.shared.data(from: u),
+              let img = NSImage(data: data) else { return }
+        Self.cache[url] = img
+        image = img
     }
 }
 

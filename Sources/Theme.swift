@@ -18,6 +18,7 @@ import QuartzCore            // CADisplayLink — vsync-synced panel animation
 enum Gruv {
     static let bg0    = Color(hex: 0x282828)
     static let bg1    = Color(hex: 0x3c3836)
+    static let bg2    = Color(hex: 0x504945)
     static let bg3    = Color(hex: 0x665c54)
     static let fg0    = Color(hex: 0xfbf1c7)
     static let fg1    = Color(hex: 0xebdbb2)

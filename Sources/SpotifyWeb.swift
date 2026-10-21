@@ -228,7 +228,7 @@ final class SpotifyWeb: ObservableObject {
         }
     }
 
-    struct QueueItem: Equatable { let title: String; let artist: String }
+    struct QueueItem: Equatable { let title: String; let artist: String; let imageURL: String }
 
     /// The first three items of the play queue (tracks or episodes). Silent on failure.
     func queue(done: @escaping ([QueueItem]) -> Void) {
@@ -241,7 +241,11 @@ final class SpotifyWeb: ObservableObject {
                 guard let name = j["name"] as? String, !name.isEmpty else { return nil }
                 let artists = ((j["artists"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
                 let show = (j["show"] as? [String: Any])?["name"] as? String
-                return QueueItem(title: name, artist: artists.isEmpty ? (show ?? "") : artists.joined(separator: ", "))
+                // Tracks carry art on album.images, episodes on images; take the smallest (thumbnail).
+                let imgs = ((j["album"] as? [String: Any])?["images"] as? [[String: Any]]) ?? (j["images"] as? [[String: Any]]) ?? []
+                let thumb = imgs.min { ($0["width"] as? Int ?? .max) < ($1["width"] as? Int ?? .max) }?["url"] as? String
+                return QueueItem(title: name, artist: artists.isEmpty ? (show ?? "") : artists.joined(separator: ", "),
+                                 imageURL: thumb ?? "")
             })
         }
     }
