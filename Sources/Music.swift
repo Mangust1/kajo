@@ -121,6 +121,7 @@ final class NowPlayingModel: ObservableObject {
             tabOpen = true
             refreshQueue()
             web?.loadDevices()   // device-button tint
+            web?.noteContext(trackID: trackID)   // context may have changed without a track change
             timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
             return
         }
@@ -453,6 +454,7 @@ final class NowPlayingModel: ObservableObject {
         if ["change", "load", "start"].contains(event), !id.isEmpty, skipIDs.removeValue(forKey: id) != nil { web?.next() }
         if id != trackID {
             trackID = id; artist = ""; album = ""; positionAt = .distantPast   // new track starts at 0 unless the event says otherwise
+            web?.noteContext(trackID: id)   // playlist/album context for auto-resume
             if tabOpen, ["change", "load", "start"].contains(event) { refreshQueue(after: 2) }   // Spotify's queue lags the change
         }
         title = name

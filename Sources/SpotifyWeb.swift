@@ -229,9 +229,49 @@ final class SpotifyWeb: ObservableObject {
         }
     }
 
+    /// Last playback context seen for a track (GET /me/player): the playlist/album to resume in,
+    /// plus shuffle/repeat. `contextURI` is nil when Spotify reports none (e.g. a lone track).
+    struct PlaybackContext { let trackID: String; let contextURI: String?; let shuffle: Bool?; let repeatState: String? }
+    private(set) var lastContext: PlaybackContext?
+
+    /// Quietly reads /me/player and remembers its context when it is playing `trackID`. The Web API
+    /// lags spotifyd's track change, so a mismatch retries after 2 s (twice at most).
+    func noteContext(trackID: String, attempt: Int = 1) {
+        guard hasToken, !trackID.isEmpty else { return }
+        api("GET", "/me/player", quiet: true) { [weak self] code, data in
+            guard let self, code == 200,
+                  let j = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else { return }
+            guard (j["item"] as? [String: Any])?["id"] as? String == trackID else {
+                if attempt < 3 { DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.noteContext(trackID: trackID, attempt: attempt + 1) } }
+                return
+            }
+            self.lastContext = PlaybackContext(trackID: trackID,
+                                               contextURI: (j["context"] as? [String: Any])?["uri"] as? String,
+                                               shuffle: j["shuffle_state"] as? Bool,
+                                               repeatState: j["repeat_state"] as? String)
+        }
+    }
+
+    /// After a resume: put shuffle/repeat back to what `ctx` saw, only where /me/player now differs.
+    private func restoreModes(_ ctx: PlaybackContext?, deviceID id: String) {
+        guard let ctx, ctx.shuffle != nil || ctx.repeatState != nil else { return }
+        api("GET", "/me/player", quiet: true) { [weak self] code, data in
+            guard let self, code == 200,
+                  let j = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else { return }
+            if let want = ctx.shuffle, j["shuffle_state"] as? Bool != want {
+                self.api("PUT", "/me/player/shuffle?state=\(want)&device_id=\(id)", quiet: true)
+            }
+            if let want = ctx.repeatState, j["repeat_state"] as? String != want {
+                self.api("PUT", "/me/player/repeat?state=\(want)&device_id=\(id)", quiet: true)
+            }
+        }
+    }
+
     /// spotifyd session drop healed but playback stayed stopped: if nothing plays anywhere, start
     /// the configured device again — same track → transfer + play (seek only when > 5 s off),
-    /// another or no track loaded → play `trackID` at `positionMs`. Errors → caption.
+    /// another or no track loaded → play `trackID` at `positionMs`, inside its remembered playlist/
+    /// album context when `noteContext` saw one (else as a lone track, which stops at its end).
+    /// Shuffle/repeat are put back afterwards when they differ. Errors → caption.
     /// After spotifyd rebuilds its session the device is missing from /me/player/devices for a few
     /// seconds, so the lookup polls once a second for up to 15 s before captioning "not found";
     /// /me/player is read after the device is back so the "nothing plays" check is fresh.
@@ -255,10 +295,15 @@ final class SpotifyWeb: ObservableObject {
                 if j?["is_playing"] as? Bool == true { restoreVolume(); return }   // playing here or elsewhere: leave playback
                 let loaded = (j?["item"] as? [String: Any])?["id"] as? String
                 let progress = j?["progress_ms"] as? Int ?? 0
-                let resumed = { self.caption = "Resumed after a Spotify disconnect"; restoreVolume() }   // after api() cleared it
+                let ctx = self.lastContext?.trackID == trackID ? self.lastContext : nil
+                let resumed = {   // after api() cleared the caption
+                    self.caption = "Resumed after a Spotify disconnect"; restoreVolume(); self.restoreModes(ctx, deviceID: id)
+                }
                 if loaded != trackID {
-                    self.api("PUT", "/me/player/play?device_id=\(id)",
-                             json: ["uris": ["spotify:track:\(trackID)"], "position_ms": positionMs]) { code, _ in
+                    let uri = "spotify:track:\(trackID)"
+                    let body: [String: Any] = ctx?.contextURI.map { ["context_uri": $0, "offset": ["uri": uri], "position_ms": positionMs] }
+                        ?? ["uris": [uri], "position_ms": positionMs]
+                    self.api("PUT", "/me/player/play?device_id=\(id)", json: body) { code, _ in
                         if code > 0, code < 300 { resumed() }
                     }
                     return
