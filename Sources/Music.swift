@@ -35,6 +35,7 @@ final class NowPlayingModel: ObservableObject {
     @Published var upNext: [SpotifyWeb.QueueItem] = []   // spotifyd only: the play queue (up to ~20)
     enum SlideOver { case playlists, search }
     @Published var slideOver: SlideOver?   // spotifyd only: the open slide-over, one at a time (Esc closes it first)
+    @Published var openPlaylist: SpotifyWeb.Playlist?   // Playlists slide-over showing this one's tracks (Esc goes back first)
     @Published var showDevices = false     // spotifyd only: the device picker popover is open (Esc closes it first)
     /// spotifyd mode: never AppleScript, launch or restart Spotify.app; controls go through the Web API.
     let spotifyd = musicSource == "spotifyd"
@@ -136,14 +137,54 @@ final class NowPlayingModel: ObservableObject {
         queuePending?.cancel()
         let w = DispatchWorkItem { [weak self] in
             guard let self, self.tabOpen else { return }
-            web.queue { [weak self] items in self?.upNext = items }   // errors: list just stays
+            web.queue { [weak self] items in self?.setQueue(items) }   // errors: list just stays
         }
         queuePending = w
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: w)
     }
 
-    /// Jump to queue row `index` (0-based) = index+1 × next; see SpotifyWeb.skip for the ceiling.
-    func playQueued(_ index: Int) { web?.skip(index + 1) }
+    /// Jump to shown queue row `index` (0-based) = its position in Spotify's queue + 1 × next; see
+    /// SpotifyWeb.skip for the ceiling. Hidden (removed) rows jumped over leave the skip list, or
+    /// their passing change events would fire extra nexts.
+    func playQueued(_ index: Int) {
+        guard index < upNextRaw.count else { return }
+        let raw = upNextRaw[index]
+        rawQueue.prefix(raw).forEach { skipIDs[Self.itemID($0.uri)] = nil }
+        web?.skip(raw + 1)
+    }
+
+    // MARK: Remove from queue (local skip list)
+    // ponytail: Spotify's Web API has no queue-delete endpoint, so "Remove from queue" only hides the
+    // row and records the track id; when that track becomes current (change/load/start) Kajo sends
+    // one next(). Ceiling: the track may be audible for a fraction of a second, nothing is removed
+    // server-side, and Spotify's own clients still list it. In memory only: max 50 ids, 3 h each.
+    // Upgrade path if Spotify ever adds a queue-delete endpoint: call it and drop the skip list.
+    private var skipIDs: [String: Date] = [:]   // track/episode id → when it was removed
+    private var rawQueue: [SpotifyWeb.QueueItem] = []   // Spotify's queue as last read
+    private var upNextRaw: [Int] = []                   // upNext[i] = rawQueue[upNextRaw[i]]
+
+    private static func itemID(_ uri: String) -> String { uri.split(separator: ":").last.map(String.init) ?? "" }
+
+    private func pruneSkips() {
+        let cutoff = Date().addingTimeInterval(-3 * 3600)
+        skipIDs = skipIDs.filter { $0.value > cutoff }
+        while skipIDs.count > 50, let oldest = skipIDs.min(by: { $0.value < $1.value }) { skipIDs[oldest.key] = nil }
+    }
+
+    /// Spotify's queue minus skip-listed ids.
+    private func setQueue(_ items: [SpotifyWeb.QueueItem]) {
+        pruneSkips()
+        rawQueue = items
+        upNextRaw = items.indices.filter { skipIDs[Self.itemID(items[$0].uri)] == nil }
+        upNext = upNextRaw.map { items[$0] }
+    }
+
+    func removeFromQueue(_ item: SpotifyWeb.QueueItem) {
+        let id = Self.itemID(item.uri)
+        guard !id.isEmpty else { return }
+        skipIDs[id] = Date()
+        setQueue(rawQueue)
+    }
 
     /// "Play next": add the row's item to the user queue, then re-read the queue (Spotify lags ~1 s).
     func playNext(_ item: SpotifyWeb.QueueItem) { enqueue(item.uri) }
@@ -157,8 +198,10 @@ final class NowPlayingModel: ObservableObject {
     }
 
     /// Open `s`, or close it when it is already the open one.
-    func toggleSlideOver(_ s: SlideOver) { withAnimation(.spring(duration: 0.3)) { slideOver = slideOver == s ? nil : s } }
-    func closeSlideOver() { withAnimation(.spring(duration: 0.3)) { slideOver = nil } }
+    func toggleSlideOver(_ s: SlideOver) { withAnimation(.spring(duration: 0.3)) { slideOver = slideOver == s ? nil : s; openPlaylist = nil } }
+    func closeSlideOver() { withAnimation(.spring(duration: 0.3)) { slideOver = nil; openPlaylist = nil } }
+    /// Playlists slide-over: push a playlist's track list (nil = back to the list).
+    func showPlaylist(_ p: SpotifyWeb.Playlist?) { withAnimation(.spring(duration: 0.3)) { openPlaylist = p } }
 
     /// Device picker row click: transfer playback there, then re-read the queue (Spotify lags ~1 s).
     func transferPlayback(to d: SpotifyWeb.Device) {
@@ -402,6 +445,8 @@ final class NowPlayingModel: ObservableObject {
         if event == "start" { isPlaying = true } else if event == "pause" { isPlaying = false }
 
         let id = str("TRACK_ID")
+        // Removed from the queue (skip list): skip it once as it starts, then forget it so a later deliberate play works.
+        if ["change", "load", "start"].contains(event), !id.isEmpty, skipIDs.removeValue(forKey: id) != nil { web?.next() }
         if id != trackID {
             trackID = id; artist = ""; album = ""; positionAt = .distantPast   // new track starts at 0 unless the event says otherwise
             if tabOpen, ["change", "load", "start"].contains(event) { refreshQueue(after: 2) }   // Spotify's queue lags the change
@@ -605,6 +650,7 @@ struct UpNextList: View {
                                 .contextMenu {
                                     Button("Play next") { model.playNext(item) }.disabled(item.uri.isEmpty)
                                     Button("Play now") { model.playQueued(i) }
+                                    Button("Remove from queue") { model.removeFromQueue(item) }.disabled(item.uri.isEmpty)
                                     if !item.link.isEmpty {
                                         Button("Copy Spotify link") {
                                             NSPasteboard.general.clearContents()
@@ -952,18 +998,20 @@ private struct SlideOverPanel<Accessory: View, Content: View>: View {
     @ObservedObject var web: SpotifyWeb
     let title: String
     let busy: Bool
+    var onBack: (() -> Void)? = nil   // nil = close the slide-over (a pushed view goes back instead)
     @ViewBuilder var accessory: Accessory
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Button { model.closeSlideOver() } label: {
+                Button { if let onBack { onBack() } else { model.closeSlideOver() } } label: {
                     Image(systemName: "chevron.left").font(.system(size: 13, weight: .semibold)).foregroundStyle(Gruv.fg2)
                         .frame(width: 22, height: 22).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Gruv.fg1)
+                    .lineLimit(1).truncationMode(.tail)
                 accessory
                 Spacer()
                 if busy { ProgressView().controlSize(.small) }
@@ -1001,9 +1049,23 @@ private func copyLink(_ link: String) {
     NSPasteboard.general.setString(link, forType: .string)
 }
 
-/// spotifyd mode: the user's playlists slide-over. Click = play on the configured device and close;
-/// right-click = Play / Shuffle play / Copy link.
+/// spotifyd mode: the user's playlists slide-over. Click = open its tracks (PlaylistDetail, pushed in
+/// the same slide-over); right-click = Play / Shuffle play / Copy link.
 struct PlaylistsPanel: View {
+    @ObservedObject var model: NowPlayingModel
+    @ObservedObject var web: SpotifyWeb
+
+    var body: some View {
+        if let p = model.openPlaylist {
+            PlaylistDetail(model: model, web: web, playlist: p).id(p.id)
+                .transition(.move(edge: .trailing))
+        } else {
+            PlaylistList(model: model, web: web)
+        }
+    }
+}
+
+private struct PlaylistList: View {
     @ObservedObject var model: NowPlayingModel
     @ObservedObject var web: SpotifyWeb
     @State private var filter = ""
@@ -1027,7 +1089,7 @@ struct PlaylistsPanel: View {
                 ScrollView(showsIndicators: false) {
                     LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(shown) { p in
-                            MediaRow(title: p.name, detail: detail(p), imageURL: p.imageURL, hoverSymbol: "play.fill") { play(p, shuffle: false) }
+                            MediaRow(title: p.name, detail: detail(p), imageURL: p.imageURL, hoverSymbol: "chevron.right") { model.showPlaylist(p) }
                                 .contextMenu {
                                     Button("Play") { play(p, shuffle: false) }
                                     Button("Shuffle play") { play(p, shuffle: true) }
@@ -1075,6 +1137,149 @@ struct PlaylistsPanel: View {
             if ok { model.closeSlideOver() }   // failure: the caption explains, panel stays
         }
         if shuffle { web.shufflePlay(p.uri, done: done) } else { web.playContext(p.uri, done: done) }
+    }
+}
+
+/// A playlist's tracks inside the Playlists slide-over: Play / Shuffle row, then the tracks. Click =
+/// play the playlist from that track; right-click Play from here / Play next / Copy link / Remove from
+/// playlist (owner only; a token without the modify scopes offers Reconnect instead). Removal is
+/// optimistic with a 6 s Undo bar; an API error puts the row back (the caption says why).
+private struct PlaylistDetail: View {
+    @ObservedObject var model: NowPlayingModel
+    @ObservedObject var web: SpotifyWeb
+    let playlist: SpotifyWeb.Playlist
+    @State private var tracks: [SpotifyWeb.PlaylistTrack] = []
+    @State private var snapshot = ""
+    @State private var loading = true
+    @State private var busy = false
+    @State private var note: Note?
+    @State private var noteTask: DispatchWorkItem?
+
+    /// Bottom bar: "Queued: x" (green) or "Removed x · Undo" (`undo` set once the DELETE succeeded).
+    struct Note { let text: String; var removed: (track: SpotifyWeb.PlaylistTrack, index: Int)? = nil; var undoReady = false }
+
+    private var owned: Bool { !playlist.ownerID.isEmpty && playlist.ownerID == web.userID }
+
+    var body: some View {
+        SlideOverPanel(model: model, web: web, title: playlist.name, busy: loading || busy, onBack: { model.showPlaylist(nil) }) {
+            if !loading { Text("\(tracks.count)").font(.caption.monospacedDigit()).foregroundStyle(Gruv.gray) }
+        } content: {
+            HStack(spacing: 8) {
+                pill("play.fill", "Play") { play(shuffle: false) }
+                pill("shuffle", "Shuffle") { play(shuffle: true) }
+            }
+            ScrollView(showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    ForEach(tracks) { t in
+                        MediaRow(title: t.title, detail: t.detail, imageURL: t.imageURL, hoverSymbol: "play.fill") { playFrom(t) }
+                            .contextMenu { menu(t) }
+                    }
+                }
+                .padding(.bottom, 10)
+            }
+            if let note { noteBar(note) }
+        }
+        .onAppear { load(); web.loadMe() }
+        .onDisappear { noteTask?.cancel() }
+    }
+
+    private func pill(_ symbol: String, _ text: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) { Image(systemName: symbol); Text(text) }
+                .font(.callout.weight(.medium)).foregroundStyle(Gruv.green)
+                .padding(.vertical, 5).padding(.horizontal, 12)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Gruv.green.opacity(0.15)))
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+    }
+
+    @ViewBuilder private func menu(_ t: SpotifyWeb.PlaylistTrack) -> some View {
+        Button("Play from here") { playFrom(t) }
+        Button("Play next") { queue(t) }
+        Button("Copy link") { copyLink(t.link) }.disabled(t.link.isEmpty)
+        if owned {
+            if web.canEditPlaylists {
+                Button("Remove from playlist") { remove(t) }
+            } else {
+                Button("Reconnect to edit playlists") { web.connect() }.disabled(web.connecting)
+            }
+        }
+    }
+
+    private func noteBar(_ n: Note) -> some View {
+        HStack(spacing: 8) {
+            Text(n.text).font(.caption).foregroundStyle(n.removed == nil ? Gruv.green : Gruv.fg2).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 4)
+            if n.removed != nil {
+                Button("Undo") { undo() }.buttonStyle(.plain).font(.caption.weight(.semibold))
+                    .foregroundStyle(n.undoReady ? Gruv.aqua : Gruv.gray).disabled(!n.undoReady)
+            }
+        }
+        .padding(.vertical, 6).padding(.horizontal, 10)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Gruv.bg1))
+    }
+
+    private func show(_ n: Note?, for seconds: Double) {
+        note = n
+        noteTask?.cancel()
+        let w = DispatchWorkItem { note = nil }
+        noteTask = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: w)
+    }
+
+    private func load() {
+        web.playlistTracks(playlist.id) { r in
+            loading = false
+            if let r { tracks = r.tracks; snapshot = r.snapshot.isEmpty ? playlist.snapshotID : r.snapshot }
+        }
+    }
+
+    private func finish(_ ok: Bool) { busy = false; if ok { model.closeSlideOver() } }   // failure: the caption explains
+
+    private func play(shuffle: Bool) {
+        guard !busy else { return }
+        busy = true
+        if shuffle { web.shufflePlay(playlist.uri, done: finish) } else { web.playContext(playlist.uri, done: finish) }
+    }
+
+    private func playFrom(_ t: SpotifyWeb.PlaylistTrack) {
+        guard !busy else { return }
+        busy = true
+        web.playFromPlaylist(playlist.uri, track: t.uri, done: finish)
+    }
+
+    private func queue(_ t: SpotifyWeb.PlaylistTrack) {
+        model.enqueue(t.uri) { ok in if ok { show(Note(text: "Queued: \(t.title)"), for: 2.5) } }
+    }
+
+    /// Spotify drops every occurrence of the uri (see removeFromPlaylist), so every matching row goes;
+    /// Undo puts one back at the first one's index.
+    private func remove(_ t: SpotifyWeb.PlaylistTrack) {
+        guard let index = tracks.firstIndex(where: { $0.id == t.id }) else { return }
+        let gone = tracks.enumerated().filter { $0.element.uri == t.uri }   // (original index, row)
+        let first = gone.first?.offset ?? index
+        withAnimation { tracks.removeAll { $0.uri == t.uri } }
+        show(Note(text: "Removed \(t.title)", removed: (t, first)), for: 6)
+        web.removeFromPlaylist(playlist.id, uri: t.uri, snapshot: snapshot) { snap in
+            guard let snap else {   // restore; api() put the error in the orange caption
+                withAnimation { gone.forEach { tracks.insert($0.element, at: min($0.offset, tracks.count)) } }
+                if note?.removed?.track.id == t.id { note = nil }
+                return
+            }
+            if !snap.isEmpty { snapshot = snap }
+            if note?.removed?.track.id == t.id { note?.undoReady = true }
+        }
+    }
+
+    private func undo() {
+        guard let r = note?.removed, note?.undoReady == true else { return }
+        note = nil; noteTask?.cancel()
+        withAnimation { tracks.insert(r.track, at: min(r.index, tracks.count)) }
+        web.addToPlaylist(playlist.id, uri: r.track.uri, position: r.index) { snap in
+            guard let snap else { withAnimation { tracks.removeAll { $0.id == r.track.id } }; return }   // caption says why
+            if !snap.isEmpty { snapshot = snap }
+        }
     }
 }
 

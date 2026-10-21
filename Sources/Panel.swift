@@ -953,6 +953,9 @@ final class PanelController {
             if event.keyCode == 53 {                                            // Esc
                 if self.state.tab == .memes, self.memes.editingMeme != nil { self.memes.editingMeme = nil; return nil }
                 if self.state.tab == .music, self.nowPlaying.showDevices { self.nowPlaying.showDevices = false; return nil }   // device popover first
+                if self.state.tab == .music, self.nowPlaying.slideOver == .playlists, self.nowPlaying.openPlaylist != nil {
+                    self.nowPlaying.showPlaylist(nil); return nil                   // playlist tracks → back to the list
+                }
                 if self.state.tab == .music, self.nowPlaying.slideOver != nil {          // Esc closes the search / playlists slide-over first
                     self.nowPlaying.closeSlideOver(); return nil
                 }

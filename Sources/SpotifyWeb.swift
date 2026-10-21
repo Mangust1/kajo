@@ -13,7 +13,7 @@ import CryptoKit
 final class SpotifyWeb: ObservableObject {
     static let port: NWEndpoint.Port = 8899
     static let redirect = "http://127.0.0.1:8899/callback"
-    static let scopes = "user-read-playback-state user-modify-playback-state user-read-currently-playing playlist-read-private playlist-read-collaborative"
+    static let scopes = "user-read-playback-state user-modify-playback-state user-read-currently-playing playlist-read-private playlist-read-collaborative playlist-modify-private playlist-modify-public"
 
     let clientID = spotifyClientID
     let deviceName = spotifyDevice
@@ -28,6 +28,13 @@ final class SpotifyWeb: ObservableObject {
 
     /// The stored token was granted the playlist scopes (tokens from before 0.39 carry no scope → false).
     var canReadPlaylists: Bool { token?.scope?.split(separator: " ").contains("playlist-read-private") ?? false }
+    /// The stored token may edit playlists (tokens from before 0.43 lack the modify scopes → Reconnect).
+    var canEditPlaylists: Bool {
+        let s = token?.scope?.split(separator: " ") ?? []
+        return s.contains("playlist-modify-private") && s.contains("playlist-modify-public")
+    }
+    /// Current user's id from GET /me (owner check for "Remove from playlist"), cached for the session.
+    @Published var userID: String?
 
     private struct Token: Codable { var access_token: String; var refresh_token: String; var expires_at: Double; var scope: String? }
     private var token: Token?
@@ -145,6 +152,7 @@ final class SpotifyWeb: ObservableObject {
                 let exp = Date().timeIntervalSince1970 + ((j["expires_in"] as? Double) ?? 3600)
                 let t = Token(access_token: access, refresh_token: refresh, expires_at: exp,
                               scope: (j["scope"] as? String) ?? self.token?.scope)
+                if form["grant_type"] == "authorization_code" { self.userID = nil }   // maybe another account now
                 self.token = t; self.hasToken = true
                 if let d = try? JSONEncoder().encode(t) { try? writePrivate(d, to: self.tokenURL) }
                 done(true)
@@ -385,6 +393,7 @@ final class SpotifyWeb: ObservableObject {
 
     struct Playlist: Identifiable, Equatable {
         let id: String; let name: String; let uri: String; let owner: String
+        var ownerID = ""; var snapshotID = ""
         let total: Int?; let imageURL: String
         var link: String { "https://open.spotify.com/playlist/\(id)" }
     }
@@ -425,9 +434,127 @@ final class SpotifyWeb: ObservableObject {
         let total = ((j["tracks"] as? [String: Any])?["total"] as? Int) ?? ((j["items"] as? [String: Any])?["total"] as? Int)
         let imgs = (j["images"] as? [[String: Any]]) ?? []
         let thumb = imgs.min { ($0["width"] as? Int ?? .max) < ($1["width"] as? Int ?? .max) }?["url"] as? String
+        let owner = j["owner"] as? [String: Any]
         return Playlist(id: id, name: (j["name"] as? String) ?? "", uri: uri,
-                        owner: ((j["owner"] as? [String: Any])?["display_name"] as? String) ?? "",
+                        owner: (owner?["display_name"] as? String) ?? "",
+                        ownerID: (owner?["id"] as? String) ?? "", snapshotID: (j["snapshot_id"] as? String) ?? "",
                         total: total, imageURL: thumb ?? "")
+    }
+
+    /// GET /me once per session → userID (quiet; nil stays nil on failure and the next call retries).
+    func loadMe() {
+        guard hasToken, userID == nil else { return }
+        api("GET", "/me", quiet: true) { [weak self] code, data in
+            guard code == 200, let j = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else { return }
+            self?.userID = j["id"] as? String
+        }
+    }
+
+    // MARK: Playlist tracks
+
+    struct PlaylistTrack: Identifiable {
+        let id = UUID()   // playlists may hold the same track twice, so the uri is no identity
+        let title: String; let detail: String; let imageURL: String
+        let uri: String; let link: String
+    }
+
+    /// A playlist's tracks + current snapshot id: GET /playlists/{id}?fields=snapshot_id, then
+    /// GET /playlists/{id}/items (Feb 2026 rename; falls back to /tracks on a 404) following `next`
+    /// up to 500. nil = failed (api() set the caption).
+    // Ceiling: 500 rows. Upgrade path for bigger playlists: page on scroll instead of up front.
+    func playlistTracks(_ playlistID: String, done: @escaping ((tracks: [PlaylistTrack], snapshot: String)?) -> Void) {
+        guard hasToken else { done(nil); return }
+        api("GET", "/playlists/\(playlistID)?fields=snapshot_id", quiet: true) { [weak self] _, data in
+            let snap = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["snapshot_id"] as? String) ?? ""
+            self?.fetchTracks("/playlists/\(playlistID)/items?limit=100", fallback: "/playlists/\(playlistID)/tracks?limit=100", into: []) { t in
+                done(t.map { ($0, snap) })
+            }
+        }
+    }
+
+    private func fetchTracks(_ path: String, fallback: String?, into acc: [PlaylistTrack], done: @escaping ([PlaylistTrack]?) -> Void) {
+        api("GET", path) { [weak self] code, data in   // a 404 caption is cleared by the fallback's success
+            guard let self else { return }
+            if code == 404, let fallback { self.fetchTracks(fallback, fallback: nil, into: acc, done: done); return }
+            guard code == 200, let r = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else { done(nil); return }
+            let all = acc + ((r["items"] as? [Any]) ?? []).compactMap { $0 as? [String: Any] }.compactMap(Self.playlistTrack)
+            let base = "https://api.spotify.com/v1"
+            if all.count < 500, let next = r["next"] as? String, next.hasPrefix(base) {
+                self.fetchTracks(String(next.dropFirst(base.count)), fallback: nil, into: all, done: done); return
+            }
+            done(Array(all.prefix(500)))
+        }
+    }
+
+    /// One playlist item → PlaylistTrack. The track sits under `item` (2026 API, verified 2026-10-21)
+    /// or `track` (older shape; in the new one `item.track` is a flag, hence dict casts). Local files
+    /// and null items are skipped (no playable URI). Pure.
+    static func playlistTrack(_ j: [String: Any]) -> PlaylistTrack? {
+        guard j["is_local"] as? Bool != true,
+              let t = (j["item"] as? [String: Any]) ?? (j["track"] as? [String: Any]),
+              let uri = t["uri"] as? String, !uri.hasPrefix("spotify:local:"),
+              let name = t["name"] as? String, !name.isEmpty else { return nil }
+        let album = t["album"] as? [String: Any]
+        let artists = ((t["artists"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }.joined(separator: ", ")
+        let imgs = (album?["images"] as? [[String: Any]]) ?? (t["images"] as? [[String: Any]]) ?? []
+        let thumb = imgs.min { ($0["width"] as? Int ?? .max) < ($1["width"] as? Int ?? .max) }?["url"] as? String
+        var link = (t["external_urls"] as? [String: Any])?["spotify"] as? String ?? ""
+        let p = uri.split(separator: ":")
+        if link.isEmpty, p.count == 3 { link = "https://open.spotify.com/\(p[1])/\(p[2])" }
+        let detail = [artists, album?["name"] as? String ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
+        return PlaylistTrack(title: name, detail: detail, imageURL: thumb ?? "", uri: uri, link: link)
+    }
+
+    /// Play `contextURI` starting at `trackURI` on the configured device (else the active one). Errors → caption.
+    func playFromPlaylist(_ contextURI: String, track trackURI: String, done: @escaping (Bool) -> Void) {
+        guard hasToken else { done(false); return }
+        withDeviceID { [weak self] id in
+            self?.api("PUT", "/me/player/play" + (id.map { "?device_id=\($0)" } ?? ""),
+                      json: ["context_uri": contextURI, "offset": ["uri": trackURI]]) { code, _ in
+                done(code > 0 && code < 300)
+            }
+        }
+    }
+
+    /// DELETE /playlists/{id}/items `{"items":[{"uri"}], "snapshot_id"}` (docs checked 2026-10-21;
+    /// the old /tracks takes the same under "tracks", tried on a 404). `done` gets the new snapshot
+    /// id, nil on failure (api() set the caption).
+    // Ceiling: Spotify removes every occurrence of the uri; position-based removal is gone from the
+    // API. Upgrade path if positions return: send the row's index.
+    func removeFromPlaylist(_ playlistID: String, uri: String, snapshot: String, done: @escaping (String?) -> Void) {
+        guard hasToken, !uri.isEmpty else { done(nil); return }
+        func body(_ key: String) -> [String: Any] {
+            var b: [String: Any] = [key: [["uri": uri]]]
+            if !snapshot.isEmpty { b["snapshot_id"] = snapshot }
+            return b
+        }
+        api("DELETE", "/playlists/\(playlistID)/items", json: body("items")) { [weak self] code, data in
+            if code == 404 {
+                self?.api("DELETE", "/playlists/\(playlistID)/tracks", json: body("tracks")) { code, data in done(Self.snapshot(code, data)) }
+                return
+            }
+            done(Self.snapshot(code, data))
+        }
+        playlistsAt = nil   // track counts changed: reload the list next time it opens
+    }
+
+    /// POST /playlists/{id}/items `{"uris":[uri], "position"}` (Undo; /tracks on a 404). New snapshot id or nil.
+    func addToPlaylist(_ playlistID: String, uri: String, position: Int, done: @escaping (String?) -> Void) {
+        guard hasToken, !uri.isEmpty else { done(nil); return }
+        let body: [String: Any] = ["uris": [uri], "position": position]
+        api("POST", "/playlists/\(playlistID)/items", json: body) { [weak self] code, data in
+            if code == 404 {
+                self?.api("POST", "/playlists/\(playlistID)/tracks", json: body) { code, data in done(Self.snapshot(code, data)) }
+                return
+            }
+            done(Self.snapshot(code, data))
+        }
+        playlistsAt = nil
+    }
+
+    private static func snapshot(_ code: Int, _ data: Data?) -> String? {
+        guard code > 0, code < 300 else { return nil }
+        return (data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["snapshot_id"] as? String) ?? ""
     }
 
     /// The configured device's id when Spotify lists it, else nil (quiet lookup).
@@ -590,5 +717,13 @@ func _spotifyLinkSelfCheck() {
     ])
     assert(sr.tracks.first?.detail == "A · Al" && sr.tracks.first?.link == "https://open.spotify.com/track/t1")
     assert(sr.albums.first?.detail == "A · 2001" && sr.playlists.map(\.detail) == ["O"] && sr.artists.isEmpty)
+    // Playlist items: 2026 `item` key (with the boolean item.track flag), old `track` key, local files skipped.
+    let pt = SpotifyWeb.playlistTrack(["is_local": false, "item": ["name": "T", "uri": "spotify:track:t1", "track": true,
+                                       "artists": [["name": "A"]], "album": ["name": "Al"]]])
+    assert(pt?.detail == "A · Al" && pt?.link == "https://open.spotify.com/track/t1")
+    assert(SpotifyWeb.playlistTrack(["track": ["name": "T", "uri": "spotify:track:t2"]])?.uri == "spotify:track:t2")
+    assert(SpotifyWeb.playlistTrack(["is_local": true, "track": ["name": "L", "uri": "spotify:local:x"]]) == nil)
+    assert(SpotifyWeb.playlistTrack(["item": NSNull()]) == nil)
+    assert(SpotifyWeb.playlist(["id": "p", "uri": "spotify:playlist:p", "snapshot_id": "s", "owner": ["id": "u"]])?.ownerID == "u")
 }
 #endif
