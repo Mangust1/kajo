@@ -440,6 +440,7 @@ final class NowPlayingModel: ObservableObject {
         if let v = Double(str("VOLUME")) { volume = min(1, max(0, v / 65535)) }
 
         noteSessionEvent(event, at: at, volumeBefore: volumeBefore)
+        learnVolume(before: volumeBefore)
         let name = str("TRACK_NAME")
         guard !name.isEmpty, !["stop", "sessiondisconnected"].contains(event) else {
             hasTrack = false; isPlaying = false; setPosition(0, duration: durationSec); return
@@ -503,24 +504,44 @@ final class NowPlayingModel: ObservableObject {
             // from the original drop, not the latest one.
             guard spotifyAutoResume, resumeArmed == nil, isPlaying, let web, web.hasToken, !trackID.isEmpty else { return }
             tick()   // the event carries POSITION_MS=0: take the extrapolated position instead
-            resumeArmed = (trackID, Int(positionSec * 1000), volumeBefore.map { Int(($0 * 100).rounded()) }, Date())
+            resumeArmed = (trackID, Int(positionSec * 1000), Self.lastVolume ?? volumeBefore.map { Int(($0 * 100).rounded()) }, Date())
             resumeFallback?.cancel()
             let w = DispatchWorkItem { [weak self] in self?.fireResume() }
             resumeFallback = w
             DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: w)
         case "sessionconnected":
-            fireResume()
+            connectedAt = Date()
+            if resumeArmed != nil { fireResume() }   // the resume restores lastVolume itself
+            else if let v = Self.lastVolume, let web, web.hasToken { web.restoreVolume(v) }
         case "start":
             resumeArmed = nil   // playing again by other means (spotifyd itself, another client)
         default: break
         }
     }
 
+    // MARK: remembered volume
+    // A spotifyd PROCESS restart (launchd kickstart, upgrade, reboot) starts a fresh player at its
+    // initial_volume and emits sessionconnected + volumeset with no disconnect, so the pre-drop
+    // volume above never exists. Remember the user's last deliberate volume instead: learned while
+    // a track plays, ignored for 10 s after a sessionconnected (the fresh player's default, and our
+    // own restore, land there), put back on every sessionconnected.
+    // ponytail: "deliberate" = changed while playing outside that window; a volume changed while
+    // paused isn't learned. Upgrade path: tag Kajo's own setVolume calls if that ever matters.
+    private static let lastVolumeKey = "spotify.lastVolume"
+    static var lastVolume: Int? { UserDefaults.standard.object(forKey: lastVolumeKey) as? Int }
+    private var connectedAt = Date.distantPast
+
+    private func learnVolume(before: Double?) {
+        guard let v = volume, v != before, isPlaying, Date().timeIntervalSince(connectedAt) > 10 else { return }
+        UserDefaults.standard.set(Int((v * 100).rounded()), forKey: Self.lastVolumeKey)
+    }
+
     private func fireResume() {
         resumeFallback?.cancel(); resumeFallback = nil
         guard let r = resumeArmed else { return }
         resumeArmed = nil   // one attempt per arm
-        guard Date().timeIntervalSince(r.at) < 60, let web else { return }
+        guard let web else { return }
+        guard Date().timeIntervalSince(r.at) < 60 else { if let v = r.volumePercent { web.restoreVolume(v) }; return }   // too late to resume, still fix the volume
         web.resumeAfterDrop(trackID: r.trackID, positionMs: r.positionMs, volumePercent: r.volumePercent)
     }
 

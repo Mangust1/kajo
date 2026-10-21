@@ -276,7 +276,7 @@ final class SpotifyWeb: ObservableObject {
     /// seconds, so the lookup polls once a second for up to 15 s before captioning "not found";
     /// /me/player is read after the device is back so the "nothing plays" check is fresh.
     /// spotifyd's fresh player starts at its config initial_volume, so once the device is back
-    /// `volumePercent` (the volume before the drop) is restored on it when it differs by > 2 —
+    /// `volumePercent` (the remembered `spotify.lastVolume`, else the volume before the drop) is restored on it when it differs by > 2 —
     /// after a successful resume, or right away when something already plays (user pressed play).
     // ponytail: "nothing plays" is judged from one GET /me/player; a client that starts playing a
     // second later gets overridden by the transfer. Acceptable for a one-shot within 60 s of the drop.
@@ -316,6 +316,16 @@ final class SpotifyWeb: ObservableObject {
                     }
                 }
             }
+        }
+    }
+
+    /// spotifyd came back (any cause): once the device is listed again, put `percent` back on it
+    /// when its fresh volume differs by > 2. By device id: another device may be the active one.
+    func restoreVolume(_ percent: Int) {
+        guard hasToken else { return }
+        waitForDevice(named: deviceName, tries: 15) { [weak self] d in
+            guard let self, let d, let id = d.deviceID, abs((d.volume ?? -100) - percent) > 2 else { return }
+            self.setVolume(percent, deviceID: id)
         }
     }
 
