@@ -18,6 +18,7 @@ import QuartzCore            // CADisplayLink — vsync-synced panel animation
 
 #if DEBUG
 MainActor.assumeIsolated { _severaBuildSelfCheck() }   // -DDEBUG builds (make dev / make check) assert the usage→project grouping first
+_spotifyLinkSelfCheck()                                  // and the Music tab's pasted-link parser
 #endif
 
 // Self-check / scripting: `Kajo --clean-url <url>` prints the cleaned URL and exits.

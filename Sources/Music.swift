@@ -32,7 +32,7 @@ final class NowPlayingModel: ObservableObject {
     @Published var automationDenied = false
     @Published var restarting = false
     @Published var volume: Double?        // 0…1, spotifyd only (its hook exports VOLUME 0…65535)
-    @Published var upNext: [SpotifyWeb.QueueItem] = []   // spotifyd only: first 3 of the play queue
+    @Published var upNext: [SpotifyWeb.QueueItem] = []   // spotifyd only: the play queue (up to ~20)
     /// spotifyd mode: never AppleScript, launch or restart Spotify.app; controls go through the Web API.
     let spotifyd = musicSource == "spotifyd"
     let web: SpotifyWeb? = musicSource == "spotifyd" ? SpotifyWeb() : nil
@@ -139,6 +139,39 @@ final class NowPlayingModel: ObservableObject {
 
     /// Jump to queue row `index` (0-based) = index+1 × next; see SpotifyWeb.skip for the ceiling.
     func playQueued(_ index: Int) { web?.skip(index + 1) }
+
+    /// "Play next": add the row's item to the user queue, then re-read the queue (Spotify lags ~1 s).
+    func playNext(_ item: SpotifyWeb.QueueItem) {
+        web?.addToQueue(item.uri) { [weak self] ok in if ok { self?.refreshQueue(after: 1) } }
+    }
+
+    /// The bottom link field's Enter: track/episode → play next, album/playlist → play now,
+    /// short links resolved first. `done(text, ok)` feeds the field's own caption.
+    func submitLink(_ text: String, done: @escaping (String, Bool) -> Void) {
+        guard let web else { return }
+        if SpotifyWeb.isShortLink(text) {
+            SpotifyWeb.resolveShortLink(text) { [weak self] ref in
+                guard let ref else { done("Not a Spotify link", false); return }
+                self?.submit(ref, web: web, done: done)
+            }
+        } else if let ref = SpotifyWeb.parseRef(text) {
+            submit(ref, web: web, done: done)
+        } else {
+            done("Not a Spotify link", false)
+        }
+    }
+
+    private func submit(_ ref: SpotifyWeb.Ref, web: SpotifyWeb, done: @escaping (String, Bool) -> Void) {
+        // api() writes failures to web.caption (shown by the controls); move it to the field's line instead.
+        weak let weakSelf = self   // nested closures: see the repo's weakSelf convention
+        let finish: (String) -> (Bool) -> Void = { okText in { ok in
+            if ok { done(okText, true); weakSelf?.refreshQueue(after: 1) } else { done(web.caption.isEmpty ? "Spotify refused" : web.caption, false); web.caption = "" }
+        } }
+        switch ref.kind {
+        case "album", "playlist": web.playContext(ref.uri, done: finish("Playing \(ref.kind)"))
+        default:                  web.addToQueue(ref.uri, done: finish("Queued"))
+        }
+    }
 
     private var inFlight = false
 
@@ -392,11 +425,14 @@ struct MusicTab: View {
                 timeRow
                 if let web = model.web {
                     SpotifydControls(model: model, web: web)
-                    UpNextList(model: model, web: web)
+                    UpNextList(model: model, web: web)   // fills the middle when non-empty
+                    Spacer(minLength: 0)
+                    SpotifyLinkField(model: model, web: web)   // pinned to the bottom
+                } else {
+                    if model.automationDenied { deniedNotice } else { controls }
+                    if !model.spotifyd { openSpotifyButton }
+                    Spacer()
                 }
-                else if model.automationDenied { deniedNotice } else { controls }
-                if !model.spotifyd { openSpotifyButton }
-                Spacer()
             }
         } else {
             VStack(spacing: 14) {
@@ -407,6 +443,7 @@ struct MusicTab: View {
                 Text(model.spotifyd ? "Nothing playing on \(spotifyDevice)" : "Nothing playing").font(.headline).foregroundStyle(Gruv.fg2)
                 if let web = model.web { SpotifydControls(model: model, web: web) } else { openSpotifyButton }
                 Spacer()
+                if let web = model.web { SpotifyLinkField(model: model, web: web) }
             }
         }
     }
@@ -507,7 +544,8 @@ struct MusicTab: View {
     }
 }
 
-/// spotifyd mode: the first queue items under the controls. Clicking skips ahead to that row.
+/// spotifyd mode: the play queue under the controls, scrolling in the panel height left below
+/// them. Click skips ahead to a row; right-click offers Play next / Play now / Copy link.
 struct UpNextList: View {
     @ObservedObject var model: NowPlayingModel
     @ObservedObject var web: SpotifyWeb
@@ -520,12 +558,111 @@ struct UpNextList: View {
                     Rectangle().fill(Gruv.bg2).frame(height: 1)
                 }
                 .padding(.horizontal, 6)   // text lines up with the thumbnails below
-                ForEach(Array(model.upNext.enumerated()), id: \.offset) { i, item in
-                    UpNextRow(item: item) { model.playQueued(i) }
-                        .opacity(i == 2 ? 0.6 : 1)
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(model.upNext.enumerated()), id: \.offset) { i, item in
+                            UpNextRow(item: item) { model.playQueued(i) }
+                                .contextMenu {
+                                    Button("Play next") { model.playNext(item) }.disabled(item.uri.isEmpty)
+                                    Button("Play now") { model.playQueued(i) }
+                                    if !item.link.isEmpty {
+                                        Button("Copy Spotify link") {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(item.link, forType: .string)
+                                        }
+                                    }
+                                }
+                        }
+                    }
+                    .padding(.bottom, 10)   // last row clears the fade below
                 }
+                // Subtle fade at the bottom edge so a cut-off row reads as "scroll for more".
+                .mask(VStack(spacing: 0) {
+                    Color.white
+                    LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom).frame(height: 14)
+                })
             }
             // Full width = same edges as the progress bar; the hover background reaches them.
+            // Takes the height left under the controls (layoutPriority beats MusicTab's Spacer).
+            .frame(maxHeight: .infinity, alignment: .top)
+            .layoutPriority(1)
+        }
+    }
+}
+
+/// spotifyd mode, bottom of the tab: paste a Spotify link, Enter = play next (album/playlist:
+/// play now). Own caption line: green on success, orange on failure, cleared after a few seconds.
+struct SpotifyLinkField: View {
+    @ObservedObject var model: NowPlayingModel
+    @ObservedObject var web: SpotifyWeb
+    @State private var status = ""
+    @State private var ok = true
+    @State private var busy = false
+    @State private var clearTask: DispatchWorkItem?
+
+    var body: some View {
+        if web.hasToken {
+            VStack(spacing: 4) {
+                if !status.isEmpty {
+                    Text(status).font(.caption).foregroundStyle(ok ? Gruv.green : Gruv.orange).lineLimit(1)
+                }
+                HStack(spacing: 8) {
+                    Image(systemName: "link").font(.caption).foregroundStyle(Gruv.fg4)
+                    LinkTextField(placeholder: "Paste Spotify link · Enter = play next", onSubmit: submit)
+                    if busy { ProgressView().controlSize(.small) }
+                }
+                .padding(.vertical, 7).padding(.horizontal, 10)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Gruv.bg1))
+            }
+        }
+    }
+
+    /// Returns true when the field should clear (accepted for sending).
+    private func submit(_ text: String) -> Bool {
+        guard !busy, !text.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        busy = true
+        model.submitLink(text) { msg, good in
+            busy = false; status = msg; ok = good
+            clearTask?.cancel()
+            let w = DispatchWorkItem { status = "" }
+            clearTask = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + (good ? 2.5 : 5), execute: w)
+        }
+        return true
+    }
+}
+
+/// AppKit single-line field (same reasoning as CurrencyField: SwiftUI TextField misbehaves in the
+/// borderless non-activating panel). Enter calls `onSubmit`; a true return clears the field.
+private struct LinkTextField: NSViewRepresentable {
+    let placeholder: String
+    var onSubmit: (String) -> Bool
+
+    func makeNSView(context: Context) -> NSTextField {
+        let tf = NSTextField()
+        tf.isBordered = false
+        tf.drawsBackground = false
+        tf.focusRingType = .none
+        tf.font = .systemFont(ofSize: 12)
+        tf.textColor = NSColor(Gruv.fg1)
+        tf.cell?.isScrollable = true
+        tf.cell?.wraps = false
+        tf.cell?.lineBreakMode = .byTruncatingTail
+        tf.placeholderAttributedString = NSAttributedString(string: placeholder, attributes: [
+            .foregroundColor: NSColor(Gruv.fg4), .font: NSFont.systemFont(ofSize: 12)])
+        tf.delegate = context.coordinator
+        return tf
+    }
+    func updateNSView(_ tf: NSTextField, context: Context) { context.coordinator.onSubmit = onSubmit }
+    func makeCoordinator() -> Coordinator { Coordinator(onSubmit: onSubmit) }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var onSubmit: (String) -> Bool
+        init(onSubmit: @escaping (String) -> Bool) { self.onSubmit = onSubmit }
+        func control(_ c: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+            guard sel == #selector(NSResponder.insertNewline(_:)), let tf = c as? NSTextField else { return false }
+            if onSubmit(tf.stringValue) { tf.stringValue = "" }
+            return true
         }
     }
 }
@@ -560,8 +697,8 @@ private struct UpNextRow: View {
     }
 }
 
-/// 36 pt queue thumbnail. Loaded once per URL into a process-lifetime cache (the queue shows
-/// three small images, so no eviction; upgrade path: NSCache if it ever lists more).
+/// 36 pt queue thumbnail. Loaded once per URL into a process-lifetime cache (smallest Spotify
+/// image, ~64 px, a few KB each, so no eviction; upgrade path: NSCache if memory ever shows it).
 private struct QueueThumb: View {
     let url: String
     @State private var image: NSImage?

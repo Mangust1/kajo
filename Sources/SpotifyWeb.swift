@@ -228,26 +228,111 @@ final class SpotifyWeb: ObservableObject {
         }
     }
 
-    struct QueueItem: Equatable { let title: String; let artist: String; let imageURL: String }
+    struct QueueItem: Equatable {
+        let title: String; let artist: String; let imageURL: String
+        let uri: String     // spotify:track:<id> / spotify:episode:<id>
+        let link: String    // https://open.spotify.com/... (empty when Spotify sent neither)
+    }
 
-    /// The first three items of the play queue (tracks or episodes). Silent on failure.
+    /// The whole play queue as Spotify returns it (tracks or episodes, up to ~20). Silent on failure.
     func queue(done: @escaping ([QueueItem]) -> Void) {
         guard hasToken else { return }
         api("GET", "/me/player/queue", quiet: true) { code, data in
             guard code == 200,
                   let r = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
                   let items = r["queue"] as? [[String: Any]] else { return }
-            done(items.prefix(3).compactMap { j in
+            done(items.compactMap { j in
                 guard let name = j["name"] as? String, !name.isEmpty else { return nil }
                 let artists = ((j["artists"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
                 let show = (j["show"] as? [String: Any])?["name"] as? String
                 // Tracks carry art on album.images, episodes on images; take the smallest (thumbnail).
                 let imgs = ((j["album"] as? [String: Any])?["images"] as? [[String: Any]]) ?? (j["images"] as? [[String: Any]]) ?? []
                 let thumb = imgs.min { ($0["width"] as? Int ?? .max) < ($1["width"] as? Int ?? .max) }?["url"] as? String
+                let uri = j["uri"] as? String ?? ""
+                var link = (j["external_urls"] as? [String: Any])?["spotify"] as? String ?? ""
+                let parts = uri.split(separator: ":")   // spotify:<type>:<id>
+                if link.isEmpty, parts.count == 3 { link = "https://open.spotify.com/\(parts[1])/\(parts[2])" }
                 return QueueItem(title: name, artist: artists.isEmpty ? (show ?? "") : artists.joined(separator: ", "),
-                                 imageURL: thumb ?? "")
+                                 imageURL: thumb ?? "", uri: uri, link: link)
             })
         }
+    }
+
+    /// Add `uri` to the user queue, which plays right after the current track. Targets the
+    /// configured device when it is listed (else Spotify's active one). Errors → caption.
+    // Ceiling: there is no move/reorder endpoint, so a queue row added this way also stays at its
+    // old position in the context queue. Upgrade path if Spotify ever adds one: move instead of add.
+    func addToQueue(_ uri: String, done: @escaping (Bool) -> Void) {
+        guard hasToken, !uri.isEmpty else { done(false); return }
+        withDeviceID { [weak self] id in
+            let enc = uri.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? uri
+            self?.api("POST", "/me/player/queue?uri=\(enc)" + (id.map { "&device_id=\($0)" } ?? "")) { code, _ in
+                done(code > 0 && code < 300)
+            }
+        }
+    }
+
+    /// Play an album/playlist now on the configured device (else the active one). Errors → caption.
+    func playContext(_ uri: String, done: @escaping (Bool) -> Void) {
+        guard hasToken else { done(false); return }
+        withDeviceID { [weak self] id in
+            self?.api("PUT", "/me/player/play" + (id.map { "?device_id=\($0)" } ?? ""), json: ["context_uri": uri]) { code, _ in
+                done(code > 0 && code < 300)
+            }
+        }
+    }
+
+    /// The configured device's id when Spotify lists it, else nil (quiet lookup).
+    private func withDeviceID(_ f: @escaping (String?) -> Void) {
+        api("GET", "/me/player/devices", quiet: true) { [weak self] _, data in
+            let devices = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["devices"] as? [[String: Any]]) ?? []
+            f(devices.first { ($0["name"] as? String) == self?.deviceName }?["id"] as? String)
+        }
+    }
+
+    // MARK: Pasted links
+
+    /// `kind` is track / episode / album / playlist.
+    struct Ref: Equatable { let kind: String; let id: String; var uri: String { "spotify:\(kind):\(id)" } }
+
+    /// open.spotify.com URLs (incl. /intl-xx/ and ?si=) and spotify:<kind>:<id> URIs → Ref. Pure.
+    static func parseRef(_ text: String) -> Ref? {
+        let kinds = ["track", "episode", "album", "playlist"]
+        let ok: (String) -> Bool = { !$0.isEmpty && $0.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) } }
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.lowercased().hasPrefix("spotify:") {
+            let p = t.split(separator: ":").map(String.init)
+            return p.count == 3 && kinds.contains(p[1]) && ok(p[2]) ? Ref(kind: p[1], id: p[2]) : nil
+        }
+        guard let u = URL(string: t), ["http", "https"].contains(u.scheme?.lowercased() ?? ""),
+              u.host?.lowercased() == "open.spotify.com" else { return nil }
+        var c = u.path.split(separator: "/").map(String.init)
+        if c.first?.hasPrefix("intl-") == true { c.removeFirst() }
+        return c.count >= 2 && kinds.contains(c[0]) && ok(c[1]) ? Ref(kind: c[0], id: c[1]) : nil
+    }
+
+    /// spotify.link / spotify.app.link short links (Branch redirects).
+    static func isShortLink(_ text: String) -> Bool {
+        let h = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines))?.host?.lowercased() ?? ""
+        return h == "spotify.link" || h == "spotify.app.link"
+    }
+
+    /// First open.spotify.com item link in an HTML page (the short link's landing page). Pure.
+    static func refInHTML(_ html: String) -> Ref? {
+        let re = try! NSRegularExpression(pattern: #"https://open\.spotify\.com/(?:intl-[A-Za-z-]+/)?(?:track|episode|album|playlist)/[A-Za-z0-9]+"#)
+        guard let m = re.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              let r = Range(m.range, in: html) else { return nil }
+        return parseRef(String(html[r]))
+    }
+
+    /// Follow a short link's redirects; parse the final URL, else the landing page's HTML. nil on main if neither works.
+    static func resolveShortLink(_ text: String, done: @escaping (Ref?) -> Void) {
+        guard let u = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)) else { done(nil); return }
+        URLSession.shared.dataTask(with: u) { data, resp, _ in
+            let ref = (resp?.url).flatMap { parseRef($0.absoluteString) }
+                ?? data.flatMap { String(data: $0, encoding: .utf8) }.flatMap(refInHTML)
+            DispatchQueue.main.async { done(ref) }
+        }.resume()
     }
 
     /// Artist + album for a track id (spotifyd's hook only exports the track name). Silent on failure.
@@ -276,3 +361,20 @@ final class SpotifyWeb: ObservableObject {
         return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
     }
 }
+
+#if DEBUG
+// ponytail: asserts for the pasted-link parser; runs with the other self-checks (`make check` / `make dev`).
+func _spotifyLinkSelfCheck() {
+    typealias R = SpotifyWeb.Ref
+    assert(SpotifyWeb.parseRef("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=abc") == R(kind: "track", id: "4uLU6hMCjMI75M1A2tKUQC"))
+    assert(SpotifyWeb.parseRef(" https://open.spotify.com/intl-fi/track/4uLU6hMCjMI75M1A2tKUQC\n") == R(kind: "track", id: "4uLU6hMCjMI75M1A2tKUQC"))
+    assert(SpotifyWeb.parseRef("spotify:episode:512ojhOuo1ktJprKbVcKyQ")?.uri == "spotify:episode:512ojhOuo1ktJprKbVcKyQ")
+    assert(SpotifyWeb.parseRef("https://open.spotify.com/album/1DFixLWuPkv3KT3TnV35m3")?.kind == "album")
+    assert(SpotifyWeb.parseRef("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=x")?.kind == "playlist")
+    assert(SpotifyWeb.parseRef("https://open.spotify.com/artist/0OdUWJ0sBjDrqHygGUXeCF") == nil)
+    assert(SpotifyWeb.parseRef("https://example.com/track/abc") == nil)
+    assert(SpotifyWeb.parseRef("hello") == nil)
+    assert(SpotifyWeb.isShortLink("https://spotify.link/AbCdEf") && !SpotifyWeb.isShortLink("https://open.spotify.com/track/x"))
+    assert(SpotifyWeb.refInHTML("<a href=\"https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=1\">")?.id == "4uLU6hMCjMI75M1A2tKUQC")
+}
+#endif
