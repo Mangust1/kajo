@@ -9,5 +9,6 @@
   "berylScript": "~/Oma/claude/travel/beryl-up.sh",
   "musicSource": "spotify",
   "spotifyClientID": "",
-  "spotifyDevice": "MacBook"
+  "spotifyDevice": "MacBook",
+  "spotifyAutoResume": true
 }

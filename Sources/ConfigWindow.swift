@@ -88,6 +88,7 @@ let configFiles: [ConfigFile] = [
             Field(key: "musicSource", label: "Now Playing source (spotify | spotifyd)", kind: .text("spotify")),
             Field(key: "spotifyClientID", label: "Spotify app client ID (spotifyd controls)", kind: .text("")),
             Field(key: "spotifyDevice", label: "spotifyd device name", kind: .text("MacBook")),
+            Field(key: "spotifyAutoResume", label: "Resume spotifyd after a Spotify disconnect", kind: .toggle),
         ],
         template: """
         {

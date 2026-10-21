@@ -107,6 +107,9 @@ let berylScript = NSString(string: (appConfig["berylScript"] as? String) ?? "~/O
 let musicSource = ((appConfig["musicSource"] as? String) ?? "spotify").lowercased()
 let spotifyClientID = ((appConfig["spotifyClientID"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
 let spotifyDevice = (appConfig["spotifyDevice"] as? String) ?? "MacBook"
+// spotifyd only: after a Spotify-side session drop mid-song (sessiondisconnected → sessionconnected,
+// playback left stopped) start the same track again at the same spot. Needs a Web API token.
+let spotifyAutoResume = (appConfig["spotifyAutoResume"] as? Bool) ?? true
 
 // MARK: - Launch another app + dismiss the panel
 

@@ -229,6 +229,40 @@ final class SpotifyWeb: ObservableObject {
         }
     }
 
+    /// spotifyd session drop healed but playback stayed stopped: if nothing plays anywhere, start
+    /// the configured device again — same track → transfer + play (seek only when > 5 s off),
+    /// another or no track loaded → play `trackID` at `positionMs`. Errors → caption.
+    // ponytail: "nothing plays" is judged from one GET /me/player; a client that starts playing a
+    // second later gets overridden by the transfer. Acceptable for a one-shot within 60 s of the drop.
+    func resumeAfterDrop(trackID: String, positionMs: Int) {
+        guard hasToken else { return }
+        api("GET", "/me/player", quiet: true) { [weak self] code, data in
+            guard let self, code == 200 || code == 204 else { return }   // 204 = no active device
+            let j = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            if j?["is_playing"] as? Bool == true { return }   // playing here or elsewhere: leave it
+            let loaded = (j?["item"] as? [String: Any])?["id"] as? String
+            let progress = j?["progress_ms"] as? Int ?? 0
+            self.withDeviceID { id in
+                guard let id else { self.caption = "device \"\(self.deviceName)\" not found (is spotifyd running?)"; return }
+                let resumed = { self.caption = "Resumed after a Spotify disconnect" }   // after api() cleared it
+                if loaded != trackID {
+                    self.api("PUT", "/me/player/play?device_id=\(id)",
+                             json: ["uris": ["spotify:track:\(trackID)"], "position_ms": positionMs]) { code, _ in
+                        if code > 0, code < 300 { resumed() }
+                    }
+                    return
+                }
+                self.api("PUT", "/me/player", json: ["device_ids": [id], "play": true]) { code, _ in
+                    guard code > 0, code < 300 else { return }
+                    guard abs(progress - positionMs) > 5000 else { resumed(); return }
+                    self.api("PUT", "/me/player/seek?position_ms=\(positionMs)&device_id=\(id)") { code, _ in
+                        if code > 0, code < 300 { resumed() }
+                    }
+                }
+            }
+        }
+    }
+
     func pause()    { api("PUT", "/me/player/pause") }
     func next()     { api("POST", "/me/player/next") }
     func previous() { api("POST", "/me/player/previous") }

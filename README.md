@@ -157,8 +157,9 @@ Known limits (search capped at 10 per type, no Liked Songs context, the spotifyd
 
 ## Status
 
-Current: **v0.43.0**. Recent:
+Current: **v0.43.1**. Recent:
 
+- **v0.43.1** — spotifyd auto-resume: when Spotify drops spotifyd's session mid-song and playback stays stopped after the reconnect, Kajo restarts the same track at the same position (`spotifyAutoResume`, default on, needs the Web API token).
 - **v0.38.0–0.43.0** — Now Playing gets a second source, **spotifyd** (see [Spotify without the desktop app](#spotify-without-the-desktop-app)): state-file hook + Web API transport and volume (0.38.0), Up next queue with right-click actions (0.38.1–0.38.4), Spotify link field (0.38.5), playlists slide-over (0.39.0), device picker (0.40.0) that also signs in Connect speakers on the LAN (0.41.0), search (0.42.0), playlist track lists with *Remove from playlist* + Undo, and *Remove from queue* (0.43.0). The artist lookup retries a failed request, so SketchyBar still gets the artist after a token hiccup (0.40.0).
 - **v0.37.1** — Power: the "Draining at" wattage updates every second on battery. It reads the SMC battery-power key (`PPBR`) instead of the battery's amperage, which macOS refreshes only once a minute. Charging still shows the battery-reported figure.
 - **v0.37.0** — Network: optional **travel-router row** under Wi-Fi (`berylSSID` in `config.json`, "" = hidden). The antenna is green when connected to the router's Wi-Fi, yellow when it's in the last scan, grey otherwise; **Connect** runs `berylScript`, the caption follows its `▸` progress lines and ends on "online" or a red "failed".

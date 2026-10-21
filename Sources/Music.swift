@@ -205,6 +205,7 @@ final class NowPlayingModel: ObservableObject {
 
     /// Device picker row click: transfer playback there, then re-read the queue (Spotify lags ~1 s).
     func transferPlayback(to d: SpotifyWeb.Device) {
+        resumeArmed = nil
         web?.transfer(to: d) { [weak self] ok in
             guard ok else { return }
             self?.refreshQueue(after: 1)
@@ -375,10 +376,11 @@ final class NowPlayingModel: ObservableObject {
     }
 
     func playPause() {
+        resumeArmed = nil   // a user action wins over auto-resume
         if let web { isPlaying ? web.pause() : web.play() } else { control("playpause") }
     }
-    func next()      { if let web { web.next() } else { control("next track") } }
-    func previous()  { if let web { web.previous() } else { control("previous track") } }
+    func next()      { resumeArmed = nil; if let web { web.next() } else { control("next track") } }
+    func previous()  { resumeArmed = nil; if let web { web.previous() } else { control("previous track") } }
 
     private func control(_ cmd: String) {
         let script = "if application \"Spotify\" is running then tell application \"Spotify\" to \(cmd)"
@@ -435,6 +437,7 @@ final class NowPlayingModel: ObservableObject {
         let at = (j["ts"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) } ?? Date()
         if let v = Double(str("VOLUME")) { volume = min(1, max(0, v / 65535)) }
 
+        noteSessionEvent(event, at: at)
         let name = str("TRACK_NAME")
         guard !name.isEmpty, !["stop", "sessiondisconnected"].contains(event) else {
             hasTrack = false; isPlaying = false; setPosition(0, duration: durationSec); return
@@ -478,6 +481,42 @@ final class NowPlayingModel: ObservableObject {
                 Self.shareArtist(info.artist, trackID: id)
             }
         }
+    }
+
+    // MARK: auto-resume after a session drop
+    // spotifyd issue #1306: Spotify resets the session mid-song (sessiondisconnected), spotifyd
+    // reconnects by itself (sessionconnected), but playback stays stopped. Arm on the disconnect
+    // while playing, fire once on the reconnect (or 5 s after the drop if it never comes).
+    // ponytail: one attempt per drop and a 60 s window; a drop that takes longer to heal is left
+    // alone (the user may have moved on). Upgrade path: retry with backoff if one try proves too few.
+    private var resumeArmed: (trackID: String, positionMs: Int, at: Date)?
+    private var resumeFallback: DispatchWorkItem?
+
+    private func noteSessionEvent(_ event: String, at: Date) {
+        switch event {
+        case "sessiondisconnected":
+            // Re-reads of the same file see isPlaying already false, so this arms once per drop.
+            guard spotifyAutoResume, isPlaying, let web, web.hasToken, !trackID.isEmpty else { return }
+            tick()   // the event carries POSITION_MS=0: take the extrapolated position instead
+            resumeArmed = (trackID, Int(positionSec * 1000), Date())
+            resumeFallback?.cancel()
+            let w = DispatchWorkItem { [weak self] in self?.fireResume() }
+            resumeFallback = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: w)
+        case "sessionconnected":
+            fireResume()
+        case "start":
+            resumeArmed = nil   // playing again by other means (spotifyd itself, another client)
+        default: break
+        }
+    }
+
+    private func fireResume() {
+        resumeFallback?.cancel(); resumeFallback = nil
+        guard let r = resumeArmed else { return }
+        resumeArmed = nil   // one attempt per arm
+        guard Date().timeIntervalSince(r.at) < 60, let web else { return }
+        web.resumeAfterDrop(trackID: r.trackID, positionMs: r.positionMs)
     }
 
     /// Writes ARTIST + ARTIST_TRACK_ID into the spotifyd state file so SketchyBar's music item
