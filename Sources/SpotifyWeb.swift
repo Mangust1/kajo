@@ -164,7 +164,8 @@ final class SpotifyWeb: ObservableObject {
     // MARK: Web API
 
     /// One call to api.spotify.com/v1; a 401 refreshes once and retries. `done` gets status + body on main.
-    private func api(_ method: String, _ path: String, json: [String: Any]? = nil, retried: Bool = false,
+    /// `quiet` calls (background reads) never touch the caption.
+    private func api(_ method: String, _ path: String, json: [String: Any]? = nil, retried: Bool = false, quiet: Bool = false,
                      done: @escaping (Int, Data?) -> Void = { _, _ in }) {
         withToken(force: retried) { [weak self] access in
             guard let self else { return }
@@ -181,8 +182,9 @@ final class SpotifyWeb: ObservableObject {
             URLSession.shared.dataTask(with: req) { data, resp, err in
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 DispatchQueue.main.async {
-                    if code == 401, !retried { self.api(method, path, json: json, retried: true, done: done); return }
-                    if code == 0 { self.caption = err?.localizedDescription ?? "network error" }
+                    if code == 401, !retried { self.api(method, path, json: json, retried: true, quiet: quiet, done: done); return }
+                    if quiet {}
+                    else if code == 0 { self.caption = err?.localizedDescription ?? "network error" }
                     else if code >= 300 {
                         let j = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
                         let msg = (j?["error"] as? [String: Any])?["message"] as? String
@@ -214,6 +216,35 @@ final class SpotifyWeb: ObservableObject {
     func next()     { api("POST", "/me/player/next") }
     func previous() { api("POST", "/me/player/previous") }
     func setVolume(_ percent: Int) { api("PUT", "/me/player/volume?volume_percent=\(max(0, min(100, percent)))") }
+
+    /// Skip forward n tracks, one POST after another so Spotify sees them in order.
+    // Ceiling: the Web API has no "play queue item N" endpoint, so jumping into the queue is
+    // n × next. Upgrade path if Spotify ever adds one: replace the loop with that call.
+    func skip(_ n: Int) {
+        guard n > 0 else { return }
+        api("POST", "/me/player/next") { [weak self] code, _ in
+            guard code < 300, code > 0 else { return }
+            self?.skip(n - 1)
+        }
+    }
+
+    struct QueueItem: Equatable { let title: String; let artist: String }
+
+    /// The first three items of the play queue (tracks or episodes). Silent on failure.
+    func queue(done: @escaping ([QueueItem]) -> Void) {
+        guard hasToken else { return }
+        api("GET", "/me/player/queue", quiet: true) { code, data in
+            guard code == 200,
+                  let r = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
+                  let items = r["queue"] as? [[String: Any]] else { return }
+            done(items.prefix(3).compactMap { j in
+                guard let name = j["name"] as? String, !name.isEmpty else { return nil }
+                let artists = ((j["artists"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
+                let show = (j["show"] as? [String: Any])?["name"] as? String
+                return QueueItem(title: name, artist: artists.isEmpty ? (show ?? "") : artists.joined(separator: ", "))
+            })
+        }
+    }
 
     /// Artist + album for a track id (spotifyd's hook only exports the track name). Silent on failure.
     func trackInfo(_ id: String, done: @escaping (String, String) -> Void) {

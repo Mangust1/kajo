@@ -32,6 +32,7 @@ final class NowPlayingModel: ObservableObject {
     @Published var automationDenied = false
     @Published var restarting = false
     @Published var volume: Double?        // 0…1, spotifyd only (its hook exports VOLUME 0…65535)
+    @Published var upNext: [SpotifyWeb.QueueItem] = []   // spotifyd only: first 3 of the play queue
     /// spotifyd mode: never AppleScript, launch or restart Spotify.app; controls go through the Web API.
     let spotifyd = musicSource == "spotifyd"
     let web: SpotifyWeb? = musicSource == "spotifyd" ? SpotifyWeb() : nil
@@ -112,13 +113,32 @@ final class NowPlayingModel: ObservableObject {
         stopPolling()
         refresh()
         if spotifyd {   // the state file pushes changes; the timer only moves the clock
+            tabOpen = true
+            refreshQueue()
             timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
             return
         }
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.refresh() }
     }
 
-    func stopPolling() { timer?.invalidate(); timer = nil }
+    func stopPolling() { timer?.invalidate(); timer = nil; tabOpen = false; queuePending?.cancel() }
+
+    /// spotifyd: refresh "Next" — on tab open and after track changes while the tab is open. No timer.
+    private var tabOpen = false
+    private var queuePending: DispatchWorkItem?
+    private func refreshQueue(after delay: Double = 0) {
+        guard let web, web.hasToken else { return }
+        queuePending?.cancel()
+        let w = DispatchWorkItem { [weak self] in
+            guard let self, self.tabOpen else { return }
+            web.queue { [weak self] items in self?.upNext = items }   // errors: list just stays
+        }
+        queuePending = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: w)
+    }
+
+    /// Jump to queue row `index` (0-based) = index+1 × next; see SpotifyWeb.skip for the ceiling.
+    func playQueued(_ index: Int) { web?.skip(index + 1) }
 
     private var inFlight = false
 
@@ -310,7 +330,10 @@ final class NowPlayingModel: ObservableObject {
         if event == "start" { isPlaying = true } else if event == "pause" { isPlaying = false }
 
         let id = str("TRACK_ID")
-        if id != trackID { trackID = id; artist = ""; album = ""; positionAt = .distantPast }   // new track starts at 0 unless the event says otherwise
+        if id != trackID {
+            trackID = id; artist = ""; album = ""; positionAt = .distantPast   // new track starts at 0 unless the event says otherwise
+            if tabOpen, ["change", "load", "start"].contains(event) { refreshQueue(after: 2) }   // Spotify's queue lags the change
+        }
         title = name
         let duration = (Double(str("TRACK_DURATION")) ?? 0) / 1000
         if Self.positionEvents.contains(event), let ms = Double(str("POSITION_MS")) {
@@ -349,7 +372,10 @@ struct MusicTab: View {
                 }
                 progressBar
                 timeRow
-                if let web = model.web { SpotifydControls(model: model, web: web) }
+                if let web = model.web {
+                    SpotifydControls(model: model, web: web)
+                    UpNextList(model: model, web: web)
+                }
                 else if model.automationDenied { deniedNotice } else { controls }
                 if !model.spotifyd { openSpotifyButton }
                 Spacer()
@@ -460,6 +486,31 @@ struct MusicTab: View {
                 .frame(width: 44, height: 44)
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// spotifyd mode: the first queue items under the controls. Clicking skips ahead to that row.
+struct UpNextList: View {
+    @ObservedObject var model: NowPlayingModel
+    @ObservedObject var web: SpotifyWeb
+
+    var body: some View {
+        if web.hasToken, !model.upNext.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Next").font(.caption.weight(.semibold)).foregroundStyle(Gruv.yellow)
+                ForEach(Array(model.upNext.enumerated()), id: \.offset) { i, item in
+                    Button { model.playQueued(i) } label: {
+                        (Text(item.title).foregroundStyle(Gruv.fg1)
+                         + Text(item.artist.isEmpty ? "" : " · " + item.artist).foregroundStyle(Gruv.gray))
+                            .font(.caption).lineLimit(1).truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 24)
+        }
     }
 }
 
