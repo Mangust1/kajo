@@ -38,6 +38,7 @@ final class NowPlayingModel: ObservableObject {
     /// spotifyd mode: never AppleScript, launch or restart Spotify.app; controls go through the Web API.
     let spotifyd = musicSource == "spotifyd"
     let web: SpotifyWeb? = musicSource == "spotifyd" ? SpotifyWeb() : nil
+    let zeroconf = SpotifyZeroconf()   // device picker's "On your network" (idle until the picker opens)
     private var positionBase: Double = 0     // last real position we were told…
     private var positionAt = Date.distantPast  // …and when; the 1.5 s timer extrapolates from these
 
@@ -154,6 +155,21 @@ final class NowPlayingModel: ObservableObject {
             guard ok else { return }
             self?.refreshQueue(after: 1)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self?.web?.loadDevices() }   // re-tint
+        }
+    }
+
+    /// "On your network" row click: sign the speaker in with spotifyd's login (zeroconf addUser),
+    /// wait until the Web API lists it, then transfer playback there. addUser errors stay on the row.
+    func connectSpeaker(_ s: SpotifyZeroconf.Speaker) {
+        guard let web else { return }
+        zeroconf.addUser(s) { [weak self] ok in
+            guard ok, let self else { return }
+            self.showDevices = false
+            web.caption = "Connecting \(s.name)…"
+            web.waitForDevice(named: s.name) { [weak self] d in
+                guard let d else { web.caption = "\(s.name) signed in, but Spotify doesn't list it yet"; return }
+                self?.transferPlayback(to: d)
+            }
         }
     }
 
@@ -755,16 +771,23 @@ struct DevicesButton: View {
             .buttonStyle(.plain)
             .help("Play on…")
             .popover(isPresented: $model.showDevices, arrowEdge: .bottom) {
-                DevicesPicker(model: model, web: web)
+                DevicesPicker(model: model, web: web, zc: model.zeroconf)
             }
         }
     }
 }
 
-/// The device picker's content: Spotify Connect devices, fetched each time it opens.
+/// The device picker's content: Spotify Connect devices, fetched each time it opens, plus
+/// Connect speakers found on the LAN that the account doesn't list yet (browsed while open).
 private struct DevicesPicker: View {
     @ObservedObject var model: NowPlayingModel
     @ObservedObject var web: SpotifyWeb
+    @ObservedObject var zc: SpotifyZeroconf
+
+    /// LAN speakers minus our own spotifyd and anything the Web API already lists.
+    private var network: [SpotifyZeroconf.Speaker] {
+        zc.speakers.filter { s in s.name != spotifyDevice && !web.devices.contains { $0.name == s.name } }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -782,15 +805,62 @@ private struct DevicesPicker: View {
                     model.transferPlayback(to: d)
                 }
             }
-            Text("Speakers on your network: connect once from Spotifast or the phone.")
-                .font(.caption2).foregroundStyle(Gruv.gray)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 2)
+            if network.isEmpty {
+                Text("Speakers on your network: connect once from Spotifast or the phone.")
+                    .font(.caption2).foregroundStyle(Gruv.gray)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 2)
+            } else {
+                Text("On your network").font(.caption.weight(.semibold)).foregroundStyle(Gruv.fg2).padding(.top, 4)
+                ForEach(network) { s in
+                    NetworkSpeakerRow(speaker: s, zc: zc) { model.connectSpeaker(s) }
+                }
+            }
         }
         .padding(12)
         .frame(width: 250)
         .background(Gruv.bg0)
-        .onAppear { web.loadDevices() }
+        .onAppear { web.loadDevices(); zc.start() }
+        .onDisappear { zc.stop() }
+    }
+}
+
+/// A Connect speaker from Bonjour that isn't on the account yet. Click = zeroconf addUser.
+private struct NetworkSpeakerRow: View {
+    let speaker: SpotifyZeroconf.Speaker
+    @ObservedObject var zc: SpotifyZeroconf
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        let busy = zc.connecting == speaker.id
+        let usable = zc.hasCredentials && zc.connecting == nil
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "hifispeaker").font(.system(size: 13)).foregroundStyle(Gruv.fg2).frame(width: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(speaker.name).font(.callout).foregroundStyle(Gruv.fg1).lineLimit(1)
+                    if !zc.hasCredentials {
+                        Text("needs spotifyd login").font(.caption2).foregroundStyle(Gruv.gray)
+                    } else if busy {
+                        Text("connecting…").font(.caption2).foregroundStyle(Gruv.gray)
+                    } else if let err = zc.errors[speaker.id] {
+                        Text(err).font(.caption2).foregroundStyle(Gruv.orange).lineLimit(2)
+                    } else {
+                        Text("tap to connect").font(.caption2).foregroundStyle(Gruv.gray)
+                    }
+                }
+                Spacer(minLength: 4)
+                if busy { ProgressView().controlSize(.mini) }
+            }
+            .padding(.vertical, 5).padding(.horizontal, 7)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(hovering && usable ? Gruv.bg1 : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!usable)
+        .opacity(zc.hasCredentials ? 1 : 0.45)
+        .onHover { hovering = $0 }
     }
 }
 

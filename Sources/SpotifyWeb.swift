@@ -374,19 +374,30 @@ final class SpotifyWeb: ObservableObject {
 
     /// Connect devices Spotify currently lists (GET /me/player/devices). Quiet: refreshes the
     /// device-button tint on tab open as well as the picker's rows.
-    func loadDevices() {
-        guard hasToken else { return }
+    func loadDevices(done: (([Device]) -> Void)? = nil) {
+        guard hasToken else { done?([]); return }
         devicesLoading = true
         api("GET", "/me/player/devices", quiet: true) { [weak self] code, data in
             guard let self else { return }
             self.devicesLoading = false
-            guard code == 200 else { return }
+            guard code == 200 else { done?([]); return }
             let list = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["devices"] as? [[String: Any]]) ?? []
             self.devices = list.map { j in
                 Device(deviceID: j["id"] as? String, name: (j["name"] as? String) ?? "", type: (j["type"] as? String) ?? "",
                        isActive: j["is_active"] as? Bool ?? false, isRestricted: j["is_restricted"] as? Bool ?? false,
                        volume: j["volume_percent"] as? Int)
             }
+            done?(self.devices)
+        }
+    }
+
+    /// After a zeroconf addUser: re-read the device list once a second until `name` is listed
+    /// and selectable, giving up after `tries` reads (nil).
+    func waitForDevice(named name: String, tries: Int = 10, done: @escaping (Device?) -> Void) {
+        loadDevices { [weak self] list in
+            if let d = list.first(where: { $0.name == name && $0.selectable }) { done(d); return }
+            guard tries > 1 else { done(nil); return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self?.waitForDevice(named: name, tries: tries - 1, done: done) }
         }
     }
 

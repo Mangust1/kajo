@@ -15,7 +15,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.40.0</string>
+	<string>0.41.0</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -46,8 +46,12 @@
 	<string>Kajo shows your upcoming events in the Calendar tab.</string>
 	<key>NSCalendarsUsageDescription</key>
 	<string>Kajo shows your upcoming events in the Calendar tab.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_spotify-connect._tcp</string>
+	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Kajo talks to your home server, Home Assistant and UniFi controller on the local network.</string>
+	<string>Kajo talks to your home server, Home Assistant, UniFi controller and Spotify Connect speakers on the local network.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Kajo needs Location access to scan for nearby Wi-Fi networks and show local weather.</string>
 </dict>
