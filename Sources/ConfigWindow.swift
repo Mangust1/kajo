@@ -85,6 +85,9 @@ let configFiles: [ConfigFile] = [
             Field(key: "enabledModules", label: "Enabled tabs", kind: .modules),
             Field(key: "berylSSID", label: "Travel router Wi-Fi (Network tab)", kind: .text("GL-MT3600BE")),
             Field(key: "berylScript", label: "Travel router script", kind: .text("~/Oma/claude/travel/beryl-up.sh")),
+            Field(key: "musicSource", label: "Now Playing source (spotify | spotifyd)", kind: .text("spotify")),
+            Field(key: "spotifyClientID", label: "Spotify app client ID (spotifyd controls)", kind: .text("")),
+            Field(key: "spotifyDevice", label: "spotifyd device name", kind: .text("MacBook")),
         ],
         template: """
         {

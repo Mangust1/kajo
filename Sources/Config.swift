@@ -101,6 +101,13 @@ let scratchSize: NSSize = {
 let berylSSID = (appConfig["berylSSID"] as? String) ?? ""
 let berylScript = NSString(string: (appConfig["berylScript"] as? String) ?? "~/Oma/claude/travel/beryl-up.sh").expandingTildeInPath
 
+// Now Playing source: "spotify" (Spotify.app via AppleScript + its notification, default) or "spotifyd"
+// (headless Connect player: now playing from the hook-written spotifyd-state.json, controls via the
+// Spotify Web API with the PKCE app "spotifyClientID", aimed at the Connect device "spotifyDevice").
+let musicSource = ((appConfig["musicSource"] as? String) ?? "spotify").lowercased()
+let spotifyClientID = ((appConfig["spotifyClientID"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+let spotifyDevice = (appConfig["spotifyDevice"] as? String) ?? "MacBook"
+
 // MARK: - Launch another app + dismiss the panel
 
 extension Notification.Name {

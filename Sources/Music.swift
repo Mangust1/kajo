@@ -31,6 +31,10 @@ final class NowPlayingModel: ObservableObject {
     /// until Spotify is relaunched. Nothing in Kajo or TCC settings fixes it — a restart does.
     @Published var automationDenied = false
     @Published var restarting = false
+    @Published var volume: Double?        // 0…1, spotifyd only (its hook exports VOLUME 0…65535)
+    /// spotifyd mode: never AppleScript, launch or restart Spotify.app; controls go through the Web API.
+    let spotifyd = musicSource == "spotifyd"
+    let web: SpotifyWeb? = musicSource == "spotifyd" ? SpotifyWeb() : nil
     private var positionBase: Double = 0     // last real position we were told…
     private var positionAt = Date.distantPast  // …and when; the 1.5 s timer extrapolates from these
 
@@ -39,6 +43,7 @@ final class NowPlayingModel: ObservableObject {
     private var lastNotification: Date?   // Spotify's own PlaybackStateChanged — needs no Automation grant
 
     init() {
+        if spotifyd { watchSpotifydState(); return }
         // Same source SketchyBar uses. Keeps the tab alive when AppleScript to Spotify is denied (TCC -1743).
         DistributedNotificationCenter.default().addObserver(
             forName: NSNotification.Name("com.spotify.client.PlaybackStateChanged"), object: nil, queue: .main
@@ -106,6 +111,10 @@ final class NowPlayingModel: ObservableObject {
     func startPolling() {
         stopPolling()
         refresh()
+        if spotifyd {   // the state file pushes changes; the timer only moves the clock
+            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+            return
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.refresh() }
     }
 
@@ -114,6 +123,7 @@ final class NowPlayingModel: ObservableObject {
     private var inFlight = false
 
     func refresh() {
+        if spotifyd { reloadSpotifydState(); return }
         guard !inFlight else { return }   // Spotify not answering AppleEvents must not stack osascripts every 1.5 s
         inFlight = true
         let script = infoScript
@@ -156,7 +166,7 @@ final class NowPlayingModel: ObservableObject {
 
     /// Quit Spotify and launch it again. Spotify does not resume playback by itself afterwards.
     func restartSpotify() {
-        guard !restarting else { return }
+        guard !spotifyd, !restarting else { return }
         restarting = true
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: Self.spotifyID)
         apps.forEach { _ = $0.terminate() }
@@ -229,9 +239,11 @@ final class NowPlayingModel: ObservableObject {
         }.resume()
     }
 
-    func playPause() { control("playpause") }
-    func next()      { control("next track") }
-    func previous()  { control("previous track") }
+    func playPause() {
+        if let web { isPlaying ? web.pause() : web.play() } else { control("playpause") }
+    }
+    func next()      { if let web { web.next() } else { control("next track") } }
+    func previous()  { if let web { web.previous() } else { control("previous track") } }
 
     private func control(_ cmd: String) {
         let script = "if application \"Spotify\" is running then tell application \"Spotify\" to \(cmd)"
@@ -243,6 +255,83 @@ final class NowPlayingModel: ObservableObject {
 
     private static func runOSA(_ script: String) -> String? {
         shell("/usr/bin/osascript", ["-e", script])?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: spotifyd source
+    // spotifyd's onevent hook merges each event's env into <kajoConfigDir>/spotifyd-state.json
+    // (tmp + mv, plus "ts" = unix seconds). Every field persists until an event overwrites it, so
+    // only POSITION_MS from an event that carries it is fresh (spotifyd src/process.rs).
+    // Events: change (TRACK_NAME/DURATION/COVER), start/pause/load/seeked/positioncorrection/
+    // position_changed (POSITION_MS), stop, sessiondisconnected, volumeset (VOLUME), and others we ignore.
+    // The hook exports no artist/album; those come from the Web API once a token exists.
+
+    private var stateSource: DispatchSourceFileSystemObject?
+    private var statePending: DispatchWorkItem?
+    private var trackID = ""
+    private var infoFetchedFor = ""
+    private static let positionEvents: Set<String> = ["start", "pause", "load", "seeked", "positioncorrection", "position_changed"]
+
+    private func watchSpotifydState() {
+        reloadSpotifydState()
+        let fd = open(kajoConfigDir, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .main)
+        src.setEventHandler { [weak self] in   // the dir also changes for other files: coalesce, then one small read
+            guard let self else { return }
+            self.statePending?.cancel()
+            let w = DispatchWorkItem { [weak self] in self?.reloadSpotifydState() }
+            self.statePending = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: w)
+        }
+        src.setCancelHandler { close(fd) }
+        src.resume()
+        stateSource = src
+        // Same shortcut as ClaudeStateModel: a replaced config dir needs a relaunch.
+    }
+
+    private func reloadSpotifydState() {
+        guard let d = try? Data(contentsOf: URL(fileURLWithPath: kajoConfigDir + "/spotifyd-state.json")),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
+            if hasTrack { hasTrack = false; isPlaying = false }
+            return
+        }
+        func str(_ k: String) -> String { j[k].map { "\($0)" } ?? "" }
+        let event = str("PLAYER_EVENT")
+        let at = (j["ts"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) } ?? Date()
+        if let v = Double(str("VOLUME")) { volume = min(1, max(0, v / 65535)) }
+
+        let name = str("TRACK_NAME")
+        guard !name.isEmpty, !["stop", "sessiondisconnected"].contains(event) else {
+            hasTrack = false; isPlaying = false; setPosition(0, duration: durationSec); return
+        }
+        hasTrack = true
+        // Shortcut: other events (change, load, volumeset…) keep the last known play state, so a
+        // launch that lands on one of them shows paused until the next start/pause.
+        if event == "start" { isPlaying = true } else if event == "pause" { isPlaying = false }
+
+        let id = str("TRACK_ID")
+        if id != trackID { trackID = id; artist = ""; album = ""; positionAt = .distantPast }   // new track starts at 0 unless the event says otherwise
+        title = name
+        let duration = (Double(str("TRACK_DURATION")) ?? 0) / 1000
+        if Self.positionEvents.contains(event), let ms = Double(str("POSITION_MS")) {
+            positionBase = ms / 1000; positionAt = at
+        } else if positionAt == .distantPast {
+            positionBase = 0; positionAt = at
+        }
+        durationSec = duration
+        positionSec = positionBase
+        progress = duration > 0 ? min(1, positionBase / duration) : 0
+        tick()
+
+        let cover = str("TRACK_COVER")
+        if !cover.isEmpty, cover != artURL { artURL = cover; loadArtwork(cover) }   // old art stays until the new one loads
+        if let web, web.hasToken, !id.isEmpty, infoFetchedFor != id {
+            infoFetchedFor = id
+            web.trackInfo(id) { [weak self] a, al in
+                guard let self, self.trackID == id else { return }
+                self.artist = a; self.album = al
+            }
+        }
     }
 }
 
@@ -260,8 +349,9 @@ struct MusicTab: View {
                 }
                 progressBar
                 timeRow
-                if model.automationDenied { deniedNotice } else { controls }
-                openSpotifyButton
+                if let web = model.web { SpotifydControls(model: model, web: web) }
+                else if model.automationDenied { deniedNotice } else { controls }
+                if !model.spotifyd { openSpotifyButton }
                 Spacer()
             }
         } else {
@@ -270,8 +360,8 @@ struct MusicTab: View {
                     .fill(Gruv.bg1.opacity(0.6))
                     .frame(height: 150)
                     .overlay(Image(systemName: "music.note").font(.largeTitle).foregroundStyle(Gruv.gray))
-                Text("Nothing playing").font(.headline).foregroundStyle(Gruv.fg2)
-                openSpotifyButton
+                Text(model.spotifyd ? "Nothing playing on \(spotifyDevice)" : "Nothing playing").font(.headline).foregroundStyle(Gruv.fg2)
+                if let web = model.web { SpotifydControls(model: model, web: web) } else { openSpotifyButton }
                 Spacer()
             }
         }
@@ -368,6 +458,70 @@ struct MusicTab: View {
                 .font(.system(size: size))
                 .foregroundStyle(Gruv.fg1)
                 .frame(width: 44, height: 44)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// spotifyd mode transport: Web API buttons, a volume slider, and the setup states
+/// (no client ID → greyed + hint, no token → Connect Spotify). Errors land in `web.caption`.
+struct SpotifydControls: View {
+    @ObservedObject var model: NowPlayingModel
+    @ObservedObject var web: SpotifyWeb
+    @State private var vol: Double = 0.5
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if web.clientID.isEmpty {
+                buttons.disabled(true).opacity(0.35)
+                caption("set spotifyClientID in config.json", Gruv.gray)
+            } else if !web.hasToken {
+                Button { web.connect() } label: {
+                    HStack(spacing: 6) {
+                        if web.connecting { ProgressView().controlSize(.small) }
+                        Text(web.connecting ? "Waiting for the browser…" : "Connect Spotify")
+                    }
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(Gruv.green)
+                    .padding(.vertical, 7).padding(.horizontal, 16)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(Gruv.green.opacity(0.15)))
+                }
+                .buttonStyle(.plain)
+                .disabled(web.connecting)
+            } else {
+                buttons
+                HStack(spacing: 8) {
+                    Image(systemName: "speaker.fill").font(.caption).foregroundStyle(Gruv.gray)
+                    Slider(value: $vol, in: 0...1) { editing in
+                        if !editing { web.setVolume(Int((vol * 100).rounded())) }
+                    }
+                    .tint(Gruv.green)
+                    Image(systemName: "speaker.wave.3.fill").font(.caption).foregroundStyle(Gruv.gray)
+                }
+                .padding(.horizontal, 24)
+            }
+            if !web.caption.isEmpty { caption(web.caption, Gruv.orange) }
+        }
+        .padding(.top, 4)
+        .onAppear { if let v = model.volume { vol = v } }
+        .onChange(of: model.volume) { _, v in if let v { vol = v } }
+    }
+
+    private var buttons: some View {
+        HStack(spacing: 30) {
+            ctrl("backward.fill") { model.previous() }
+            ctrl(model.isPlaying ? "pause.fill" : "play.fill", size: 30) { model.playPause() }
+            ctrl("forward.fill") { model.next() }
+        }
+    }
+
+    private func caption(_ text: String, _ color: Color) -> some View {
+        Text(text).font(.caption).foregroundStyle(color).multilineTextAlignment(.center).lineLimit(2)
+    }
+
+    private func ctrl(_ symbol: String, size: CGFloat = 20, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: size)).foregroundStyle(Gruv.fg1).frame(width: 44, height: 44)
         }
         .buttonStyle(.plain)
     }

@@ -6,5 +6,8 @@
   "scratchFontSize": 13,
   "scratchSize": [1300, 660],
   "berylSSID": "",
-  "berylScript": "~/Oma/claude/travel/beryl-up.sh"
+  "berylScript": "~/Oma/claude/travel/beryl-up.sh",
+  "musicSource": "spotify",
+  "spotifyClientID": "",
+  "spotifyDevice": "MacBook"
 }
