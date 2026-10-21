@@ -232,18 +232,22 @@ final class SpotifyWeb: ObservableObject {
     /// spotifyd session drop healed but playback stayed stopped: if nothing plays anywhere, start
     /// the configured device again — same track → transfer + play (seek only when > 5 s off),
     /// another or no track loaded → play `trackID` at `positionMs`. Errors → caption.
+    /// After spotifyd rebuilds its session the device is missing from /me/player/devices for a few
+    /// seconds, so the lookup polls once a second for up to 15 s before captioning "not found";
+    /// /me/player is read after the device is back so the "nothing plays" check is fresh.
     // ponytail: "nothing plays" is judged from one GET /me/player; a client that starts playing a
     // second later gets overridden by the transfer. Acceptable for a one-shot within 60 s of the drop.
     func resumeAfterDrop(trackID: String, positionMs: Int) {
         guard hasToken else { return }
-        api("GET", "/me/player", quiet: true) { [weak self] code, data in
-            guard let self, code == 200 || code == 204 else { return }   // 204 = no active device
-            let j = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-            if j?["is_playing"] as? Bool == true { return }   // playing here or elsewhere: leave it
-            let loaded = (j?["item"] as? [String: Any])?["id"] as? String
-            let progress = j?["progress_ms"] as? Int ?? 0
-            self.withDeviceID { id in
-                guard let id else { self.caption = "device \"\(self.deviceName)\" not found (is spotifyd running?)"; return }
+        waitForDevice(named: deviceName, tries: 15) { [weak self] d in
+            guard let self else { return }
+            guard let id = d?.deviceID else { self.caption = "device \"\(self.deviceName)\" not found (is spotifyd running?)"; return }
+            self.api("GET", "/me/player", quiet: true) { code, data in
+                guard code == 200 || code == 204 else { return }   // 204 = no active device
+                let j = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                if j?["is_playing"] as? Bool == true { return }   // playing here or elsewhere: leave it
+                let loaded = (j?["item"] as? [String: Any])?["id"] as? String
+                let progress = j?["progress_ms"] as? Int ?? 0
                 let resumed = { self.caption = "Resumed after a Spotify disconnect" }   // after api() cleared it
                 if loaded != trackID {
                     self.api("PUT", "/me/player/play?device_id=\(id)",

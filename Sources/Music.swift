@@ -496,7 +496,9 @@ final class NowPlayingModel: ObservableObject {
         switch event {
         case "sessiondisconnected":
             // Re-reads of the same file see isPlaying already false, so this arms once per drop.
-            guard spotifyAutoResume, isPlaying, let web, web.hasToken, !trackID.isEmpty else { return }
+            // A repeat disconnect while armed keeps the first timestamp: the 60 s window counts
+            // from the original drop, not the latest one.
+            guard spotifyAutoResume, resumeArmed == nil, isPlaying, let web, web.hasToken, !trackID.isEmpty else { return }
             tick()   // the event carries POSITION_MS=0: take the extrapolated position instead
             resumeArmed = (trackID, Int(positionSec * 1000), Date())
             resumeFallback?.cancel()
