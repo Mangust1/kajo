@@ -71,7 +71,10 @@ struct PanelView: View {
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Gruv.fg1)
                 Spacer()
-                if state.tab == .music, let web = nowPlaying.web { PlaylistsButton(model: nowPlaying, web: web) }
+                if state.tab == .music, let web = nowPlaying.web {
+                    DevicesButton(model: nowPlaying, web: web)
+                    PlaylistsButton(model: nowPlaying, web: web)
+                }
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
@@ -905,6 +908,7 @@ final class PanelController {
         guard isOpen else { collapse(); return }     // kajoDismiss also fires while collapsed/peeking
         removeMonitors()
         stopAllPolling()
+        nowPlaying.showDevices = false   // the popover is its own window; don't leave it floating
         if NSApp.isActive { previousApp?.activate() }   // hand focus back to the app you came from
         animate(to: .collapsed, .spring(response: 0.32, dampingFraction: 1.0)) { $0.settleCollapsed() }
     }
@@ -943,6 +947,7 @@ final class PanelController {
             guard let self else { return event }
             if event.keyCode == 53 {                                            // Esc
                 if self.state.tab == .memes, self.memes.editingMeme != nil { self.memes.editingMeme = nil; return nil }
+                if self.state.tab == .music, self.nowPlaying.showDevices { self.nowPlaying.showDevices = false; return nil }   // device popover first
                 if self.state.tab == .music, self.nowPlaying.showPlaylists {             // Esc closes the playlists slide-over first
                     withAnimation(.spring(duration: 0.3)) { self.nowPlaying.showPlaylists = false }; return nil
                 }

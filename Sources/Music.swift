@@ -34,6 +34,7 @@ final class NowPlayingModel: ObservableObject {
     @Published var volume: Double?        // 0…1, spotifyd only (its hook exports VOLUME 0…65535)
     @Published var upNext: [SpotifyWeb.QueueItem] = []   // spotifyd only: the play queue (up to ~20)
     @Published var showPlaylists = false   // spotifyd only: the playlists slide-over is open (Esc closes it first)
+    @Published var showDevices = false     // spotifyd only: the device picker popover is open (Esc closes it first)
     /// spotifyd mode: never AppleScript, launch or restart Spotify.app; controls go through the Web API.
     let spotifyd = musicSource == "spotifyd"
     let web: SpotifyWeb? = musicSource == "spotifyd" ? SpotifyWeb() : nil
@@ -116,6 +117,7 @@ final class NowPlayingModel: ObservableObject {
         if spotifyd {   // the state file pushes changes; the timer only moves the clock
             tabOpen = true
             refreshQueue()
+            web?.loadDevices()   // device-button tint
             timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
             return
         }
@@ -144,6 +146,15 @@ final class NowPlayingModel: ObservableObject {
     /// "Play next": add the row's item to the user queue, then re-read the queue (Spotify lags ~1 s).
     func playNext(_ item: SpotifyWeb.QueueItem) {
         web?.addToQueue(item.uri) { [weak self] ok in if ok { self?.refreshQueue(after: 1) } }
+    }
+
+    /// Device picker row click: transfer playback there, then re-read the queue (Spotify lags ~1 s).
+    func transferPlayback(to d: SpotifyWeb.Device) {
+        web?.transfer(to: d) { [weak self] ok in
+            guard ok else { return }
+            self?.refreshQueue(after: 1)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self?.web?.loadDevices() }   // re-tint
+        }
     }
 
     /// The bottom link field's Enter: track/episode → play next, album/playlist → play now,
@@ -383,11 +394,16 @@ final class NowPlayingModel: ObservableObject {
         let cover = str("TRACK_COVER")
         if !cover.isEmpty, cover != artURL { artURL = cover; loadArtwork(cover) }   // old art stays until the new one loads
         if let web, web.hasToken, !id.isEmpty, infoFetchedFor != id {
-            infoFetchedFor = id
-            web.trackInfo(id) { [weak self] a, al in
-                guard let self, self.trackID == id else { return }
-                self.artist = a; self.album = al
-                Self.shareArtist(a, trackID: id)
+            infoFetchedFor = id   // in flight: blocks duplicate fetches from further state-file events
+            web.trackInfo(id) { [weak self] info in
+                guard let self else { return }
+                guard let info else {   // every try failed (e.g. mid token reconnect): the next event for this track retries
+                    if self.infoFetchedFor == id { self.infoFetchedFor = "" }
+                    return
+                }
+                guard self.trackID == id else { return }
+                self.artist = info.artist; self.album = info.album
+                Self.shareArtist(info.artist, trackID: id)
             }
         }
     }
@@ -720,6 +736,103 @@ struct PlaylistsButton: View {
             .buttonStyle(.plain)
             .help("Playlists")
         }
+    }
+}
+
+/// Header-row button left of the playlists one: opens the device picker popover. Green while
+/// another device than `spotifyDevice` is the active one.
+struct DevicesButton: View {
+    @ObservedObject var model: NowPlayingModel
+    @ObservedObject var web: SpotifyWeb
+
+    var body: some View {
+        if web.hasToken {
+            Button { model.showDevices.toggle() } label: {
+                Image(systemName: "hifispeaker.2").font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(web.playingElsewhere ? Gruv.green : Gruv.fg4)
+                    .frame(width: 26, height: 22).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Play on…")
+            .popover(isPresented: $model.showDevices, arrowEdge: .bottom) {
+                DevicesPicker(model: model, web: web)
+            }
+        }
+    }
+}
+
+/// The device picker's content: Spotify Connect devices, fetched each time it opens.
+private struct DevicesPicker: View {
+    @ObservedObject var model: NowPlayingModel
+    @ObservedObject var web: SpotifyWeb
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Play on").font(.caption.weight(.semibold)).foregroundStyle(Gruv.fg2)
+                Spacer()
+                if web.devicesLoading { ProgressView().controlSize(.mini) }
+            }
+            if web.devices.isEmpty, !web.devicesLoading {
+                Text("No devices listed").font(.caption).foregroundStyle(Gruv.gray)
+            }
+            ForEach(web.devices) { d in
+                DeviceRow(device: d) {
+                    model.showDevices = false
+                    model.transferPlayback(to: d)
+                }
+            }
+            Text("Speakers on your network: connect once from Spotifast or the phone.")
+                .font(.caption2).foregroundStyle(Gruv.gray)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 2)
+        }
+        .padding(12)
+        .frame(width: 250)
+        .background(Gruv.bg0)
+        .onAppear { web.loadDevices() }
+    }
+}
+
+private struct DeviceRow: View {
+    let device: SpotifyWeb.Device
+    let action: () -> Void
+    @State private var hovering = false
+
+    private var symbol: String {
+        switch device.type.lowercased() {
+        case "computer":   return "laptopcomputer"
+        case "smartphone": return "iphone"
+        case "speaker":    return "hifispeaker"
+        case "tv":         return "tv"
+        default:           return "speaker.wave.2"
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: symbol).font(.system(size: 13))
+                    .foregroundStyle(device.isActive ? Gruv.green : Gruv.fg2).frame(width: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(device.name).font(.callout).foregroundStyle(device.isActive ? Gruv.green : Gruv.fg1).lineLimit(1)
+                    if let v = device.volume {
+                        Text("\(v)%").font(.caption2.monospacedDigit()).foregroundStyle(Gruv.gray)
+                    }
+                }
+                Spacer(minLength: 4)
+                if device.isActive {
+                    Image(systemName: "checkmark").font(.caption.weight(.semibold)).foregroundStyle(Gruv.green)
+                }
+            }
+            .padding(.vertical, 5).padding(.horizontal, 7)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(hovering && device.selectable ? Gruv.bg1 : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!device.selectable)
+        .opacity(device.selectable ? 1 : 0.45)
+        .onHover { hovering = $0 }
     }
 }
 

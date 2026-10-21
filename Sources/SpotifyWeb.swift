@@ -23,6 +23,8 @@ final class SpotifyWeb: ObservableObject {
     @Published var playlists: [Playlist] = []
     @Published var playlistsLoading = false
     private var playlistsAt: Date?
+    @Published var devices: [Device] = []
+    @Published var devicesLoading = false
 
     /// The stored token was granted the playlist scopes (tokens from before 0.39 carry no scope → false).
     var canReadPlaylists: Bool { token?.scope?.split(separator: " ").contains("playlist-read-private") ?? false }
@@ -360,6 +362,47 @@ final class SpotifyWeb: ObservableObject {
         }
     }
 
+    // MARK: Devices
+
+    struct Device: Identifiable, Equatable {
+        let deviceID: String?   // Spotify sends null for some restricted devices
+        let name: String; let type: String
+        let isActive: Bool; let isRestricted: Bool; let volume: Int?
+        var id: String { deviceID ?? "name:" + name }
+        var selectable: Bool { !isRestricted && deviceID != nil }
+    }
+
+    /// Connect devices Spotify currently lists (GET /me/player/devices). Quiet: refreshes the
+    /// device-button tint on tab open as well as the picker's rows.
+    func loadDevices() {
+        guard hasToken else { return }
+        devicesLoading = true
+        api("GET", "/me/player/devices", quiet: true) { [weak self] code, data in
+            guard let self else { return }
+            self.devicesLoading = false
+            guard code == 200 else { return }
+            let list = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["devices"] as? [[String: Any]]) ?? []
+            self.devices = list.map { j in
+                Device(deviceID: j["id"] as? String, name: (j["name"] as? String) ?? "", type: (j["type"] as? String) ?? "",
+                       isActive: j["is_active"] as? Bool ?? false, isRestricted: j["is_restricted"] as? Bool ?? false,
+                       volume: j["volume_percent"] as? Int)
+            }
+        }
+    }
+
+    /// Something other than the configured device is the active one (button tint).
+    var playingElsewhere: Bool { devices.contains { $0.isActive && $0.name != deviceName } }
+
+    /// Transfer playback to `d` and start playing. Success → "Playing on <name>" caption; errors → caption.
+    func transfer(to d: Device, done: @escaping (Bool) -> Void) {
+        guard hasToken, d.selectable, let id = d.deviceID else { done(false); return }
+        api("PUT", "/me/player", json: ["device_ids": [id], "play": true]) { [weak self] code, _ in
+            let ok = code > 0 && code < 300
+            if ok { self?.caption = "Playing on \(d.name)" }   // set after api() cleared it on success
+            done(ok)
+        }
+    }
+
     // MARK: Pasted links
 
     /// `kind` is track / episode / album / playlist.
@@ -405,22 +448,22 @@ final class SpotifyWeb: ObservableObject {
         }.resume()
     }
 
-    /// Artist + album for a track id (spotifyd's hook only exports the track name). Silent on failure.
-    func trackInfo(_ id: String, attempt: Int = 0, done: @escaping (String, String) -> Void) {
-        guard hasToken, !id.isEmpty else { return }
-        // currently-playing, not /tracks/{id}: the Player endpoints survived Spotify's Feb–Mar 2026 Web API cuts.
-        // It lags a track change by a second or two (still reports the previous track) → retry every 2 s, 4 tries.
-        api("GET", "/me/player/currently-playing", quiet: true) { [weak self] code, data in
-            let j = (code == 200 ? data : nil)
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["item"] as? [String: Any]
-            guard let j, (j["id"] as? String) == id else {
-                if attempt < 3 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.trackInfo(id, attempt: attempt + 1, done: done) }
-                }
+    /// Artist + album for a track id (spotifyd's hook only exports the track name). `done(nil)` once
+    /// all tries failed (no token, non-200, network error); quiet either way.
+    // GET /tracks/{id} (verified 200 with artists on 2026-10-21) is keyed by id, so it has none of
+    // currently-playing's track-change lag. Failures retry after 3 s, 3 tries in all.
+    func trackInfo(_ id: String, attempt: Int = 1, done: @escaping ((artist: String, album: String)?) -> Void) {
+        guard hasToken, !id.isEmpty else { done(nil); return }
+        api("GET", "/tracks/\(id)", quiet: true) { [weak self] code, data in
+            guard code == 200, let j = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else {
+                if attempt < 3, let self {
+                    weak var weakSelf = self
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { weakSelf?.trackInfo(id, attempt: attempt + 1, done: done) ?? done(nil) }
+                } else { done(nil) }
                 return
             }
             let artists = ((j["artists"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
-            done(artists.joined(separator: ", "), ((j["album"] as? [String: Any])?["name"] as? String) ?? "")
+            done((artists.joined(separator: ", "), ((j["album"] as? [String: Any])?["name"] as? String) ?? ""))
         }
     }
 
