@@ -336,13 +336,19 @@ final class SpotifyWeb: ObservableObject {
     }
 
     /// Artist + album for a track id (spotifyd's hook only exports the track name). Silent on failure.
-    func trackInfo(_ id: String, done: @escaping (String, String) -> Void) {
+    func trackInfo(_ id: String, attempt: Int = 0, done: @escaping (String, String) -> Void) {
         guard hasToken, !id.isEmpty else { return }
         // currently-playing, not /tracks/{id}: the Player endpoints survived Spotify's Feb–Mar 2026 Web API cuts.
-        api("GET", "/me/player/currently-playing") { code, data in
-            guard code == 200,
-                  let r = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
-                  let j = r["item"] as? [String: Any], (j["id"] as? String) == id else { return }
+        // It lags a track change by a second or two (still reports the previous track) → retry every 2 s, 4 tries.
+        api("GET", "/me/player/currently-playing", quiet: true) { [weak self] code, data in
+            let j = (code == 200 ? data : nil)
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["item"] as? [String: Any]
+            guard let j, (j["id"] as? String) == id else {
+                if attempt < 3 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.trackInfo(id, attempt: attempt + 1, done: done) }
+                }
+                return
+            }
             let artists = ((j["artists"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
             done(artists.joined(separator: ", "), ((j["album"] as? [String: Any])?["name"] as? String) ?? "")
         }
