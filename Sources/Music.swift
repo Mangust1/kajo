@@ -435,9 +435,10 @@ final class NowPlayingModel: ObservableObject {
         func str(_ k: String) -> String { j[k].map { "\($0)" } ?? "" }
         let event = str("PLAYER_EVENT")
         let at = (j["ts"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) } ?? Date()
+        let volumeBefore = volume   // the drop event may already carry the fresh player's volume
         if let v = Double(str("VOLUME")) { volume = min(1, max(0, v / 65535)) }
 
-        noteSessionEvent(event, at: at)
+        noteSessionEvent(event, at: at, volumeBefore: volumeBefore)
         let name = str("TRACK_NAME")
         guard !name.isEmpty, !["stop", "sessiondisconnected"].contains(event) else {
             hasTrack = false; isPlaying = false; setPosition(0, duration: durationSec); return
@@ -489,10 +490,10 @@ final class NowPlayingModel: ObservableObject {
     // while playing, fire once on the reconnect (or 5 s after the drop if it never comes).
     // ponytail: one attempt per drop and a 60 s window; a drop that takes longer to heal is left
     // alone (the user may have moved on). Upgrade path: retry with backoff if one try proves too few.
-    private var resumeArmed: (trackID: String, positionMs: Int, at: Date)?
+    private var resumeArmed: (trackID: String, positionMs: Int, volumePercent: Int?, at: Date)?
     private var resumeFallback: DispatchWorkItem?
 
-    private func noteSessionEvent(_ event: String, at: Date) {
+    private func noteSessionEvent(_ event: String, at: Date, volumeBefore: Double?) {
         switch event {
         case "sessiondisconnected":
             // Re-reads of the same file see isPlaying already false, so this arms once per drop.
@@ -500,7 +501,7 @@ final class NowPlayingModel: ObservableObject {
             // from the original drop, not the latest one.
             guard spotifyAutoResume, resumeArmed == nil, isPlaying, let web, web.hasToken, !trackID.isEmpty else { return }
             tick()   // the event carries POSITION_MS=0: take the extrapolated position instead
-            resumeArmed = (trackID, Int(positionSec * 1000), Date())
+            resumeArmed = (trackID, Int(positionSec * 1000), volumeBefore.map { Int(($0 * 100).rounded()) }, Date())
             resumeFallback?.cancel()
             let w = DispatchWorkItem { [weak self] in self?.fireResume() }
             resumeFallback = w
@@ -518,7 +519,7 @@ final class NowPlayingModel: ObservableObject {
         guard let r = resumeArmed else { return }
         resumeArmed = nil   // one attempt per arm
         guard Date().timeIntervalSince(r.at) < 60, let web else { return }
-        web.resumeAfterDrop(trackID: r.trackID, positionMs: r.positionMs)
+        web.resumeAfterDrop(trackID: r.trackID, positionMs: r.positionMs, volumePercent: r.volumePercent)
     }
 
     /// Writes ARTIST + ARTIST_TRACK_ID into the spotifyd state file so SketchyBar's music item

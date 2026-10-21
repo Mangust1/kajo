@@ -235,20 +235,27 @@ final class SpotifyWeb: ObservableObject {
     /// After spotifyd rebuilds its session the device is missing from /me/player/devices for a few
     /// seconds, so the lookup polls once a second for up to 15 s before captioning "not found";
     /// /me/player is read after the device is back so the "nothing plays" check is fresh.
+    /// spotifyd's fresh player starts at its config initial_volume, so once the device is back
+    /// `volumePercent` (the volume before the drop) is restored on it when it differs by > 2 —
+    /// after a successful resume, or right away when something already plays (user pressed play).
     // ponytail: "nothing plays" is judged from one GET /me/player; a client that starts playing a
     // second later gets overridden by the transfer. Acceptable for a one-shot within 60 s of the drop.
-    func resumeAfterDrop(trackID: String, positionMs: Int) {
+    func resumeAfterDrop(trackID: String, positionMs: Int, volumePercent: Int?) {
         guard hasToken else { return }
         waitForDevice(named: deviceName, tries: 15) { [weak self] d in
             guard let self else { return }
-            guard let id = d?.deviceID else { self.caption = "device \"\(self.deviceName)\" not found (is spotifyd running?)"; return }
+            guard let d, let id = d.deviceID else { self.caption = "device \"\(self.deviceName)\" not found (is spotifyd running?)"; return }
+            let restoreVolume = {
+                guard let v = volumePercent, abs((d.volume ?? -100) - v) > 2 else { return }
+                self.setVolume(v, deviceID: id)   // by device id: another device may be the active one
+            }
             self.api("GET", "/me/player", quiet: true) { code, data in
                 guard code == 200 || code == 204 else { return }   // 204 = no active device
                 let j = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-                if j?["is_playing"] as? Bool == true { return }   // playing here or elsewhere: leave it
+                if j?["is_playing"] as? Bool == true { restoreVolume(); return }   // playing here or elsewhere: leave playback
                 let loaded = (j?["item"] as? [String: Any])?["id"] as? String
                 let progress = j?["progress_ms"] as? Int ?? 0
-                let resumed = { self.caption = "Resumed after a Spotify disconnect" }   // after api() cleared it
+                let resumed = { self.caption = "Resumed after a Spotify disconnect"; restoreVolume() }   // after api() cleared it
                 if loaded != trackID {
                     self.api("PUT", "/me/player/play?device_id=\(id)",
                              json: ["uris": ["spotify:track:\(trackID)"], "position_ms": positionMs]) { code, _ in
@@ -270,7 +277,9 @@ final class SpotifyWeb: ObservableObject {
     func pause()    { api("PUT", "/me/player/pause") }
     func next()     { api("POST", "/me/player/next") }
     func previous() { api("POST", "/me/player/previous") }
-    func setVolume(_ percent: Int) { api("PUT", "/me/player/volume?volume_percent=\(max(0, min(100, percent)))") }
+    func setVolume(_ percent: Int, deviceID: String? = nil) {
+        api("PUT", "/me/player/volume?volume_percent=\(max(0, min(100, percent)))" + (deviceID.map { "&device_id=\($0)" } ?? ""))
+    }
 
     /// Skip forward n tracks, one POST after another so Spotify sees them in order.
     // Ceiling: the Web API has no "play queue item N" endpoint, so jumping into the queue is
