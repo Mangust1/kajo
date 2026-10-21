@@ -13,15 +13,21 @@ import CryptoKit
 final class SpotifyWeb: ObservableObject {
     static let port: NWEndpoint.Port = 8899
     static let redirect = "http://127.0.0.1:8899/callback"
-    static let scopes = "user-read-playback-state user-modify-playback-state user-read-currently-playing"
+    static let scopes = "user-read-playback-state user-modify-playback-state user-read-currently-playing playlist-read-private playlist-read-collaborative"
 
     let clientID = spotifyClientID
     let deviceName = spotifyDevice
     @Published var hasToken = false
     @Published var connecting = false
     @Published var caption = ""
+    @Published var playlists: [Playlist] = []
+    @Published var playlistsLoading = false
+    private var playlistsAt: Date?
 
-    private struct Token: Codable { var access_token: String; var refresh_token: String; var expires_at: Double }
+    /// The stored token was granted the playlist scopes (tokens from before 0.39 carry no scope → false).
+    var canReadPlaylists: Bool { token?.scope?.split(separator: " ").contains("playlist-read-private") ?? false }
+
+    private struct Token: Codable { var access_token: String; var refresh_token: String; var expires_at: Double; var scope: String? }
     private var token: Token?
     private let tokenURL = URL(fileURLWithPath: kajoConfigDir + "/spotify-token.json")
     private var listener: NWListener?
@@ -135,7 +141,8 @@ final class SpotifyWeb: ObservableObject {
                 // PKCE refresh tokens rotate: keep the new one when sent, else the old one stays valid.
                 let refresh = (j["refresh_token"] as? String) ?? self.token?.refresh_token ?? ""
                 let exp = Date().timeIntervalSince1970 + ((j["expires_in"] as? Double) ?? 3600)
-                let t = Token(access_token: access, refresh_token: refresh, expires_at: exp)
+                let t = Token(access_token: access, refresh_token: refresh, expires_at: exp,
+                              scope: (j["scope"] as? String) ?? self.token?.scope)
                 self.token = t; self.hasToken = true
                 if let d = try? JSONEncoder().encode(t) { try? writePrivate(d, to: self.tokenURL) }
                 done(true)
@@ -280,6 +287,69 @@ final class SpotifyWeb: ObservableObject {
                 done(code > 0 && code < 300)
             }
         }
+    }
+
+    /// Shuffle on, then play `uri` — both on the configured device (else the active one). Errors → caption.
+    func shufflePlay(_ uri: String, done: @escaping (Bool) -> Void) {
+        guard hasToken else { done(false); return }
+        withDeviceID { [weak self] id in
+            let dev = id.map { "&device_id=\($0)" } ?? ""
+            self?.api("PUT", "/me/player/shuffle?state=true" + dev) { code, _ in
+                guard code > 0, code < 300 else { done(false); return }
+                self?.api("PUT", "/me/player/play" + (id.map { "?device_id=\($0)" } ?? ""), json: ["context_uri": uri]) { code, _ in
+                    done(code > 0 && code < 300)
+                }
+            }
+        }
+    }
+
+    // MARK: Playlists
+
+    struct Playlist: Identifiable, Equatable {
+        let id: String; let name: String; let uri: String; let owner: String
+        let total: Int?; let imageURL: String
+        var link: String { "https://open.spotify.com/playlist/\(id)" }
+    }
+
+    /// The user's playlists (GET /me/playlists, following `next` up to 200), cached in memory for
+    /// 5 minutes. No playlist scope → nothing (the panel shows Reconnect). Errors → caption.
+    // Liked Songs is not listed: the play endpoint documents albums, artists and playlists as the
+    // only valid contexts. Upgrade path if Spotify ever accepts spotify:user:<id>:collection: a pinned row.
+    func loadPlaylists(force: Bool = false) {
+        guard hasToken, canReadPlaylists, !playlistsLoading else { return }
+        if !force, let at = playlistsAt, Date().timeIntervalSince(at) < 300 { return }
+        playlistsLoading = true
+        fetchPlaylists("/me/playlists?limit=50", into: [])
+    }
+
+    private func fetchPlaylists(_ path: String, into acc: [Playlist]) {
+        api("GET", path) { [weak self] code, data in
+            guard let self else { return }
+            guard code == 200, let r = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else {
+                self.playlistsLoading = false; return
+            }
+            let page = ((r["items"] as? [[String: Any]]) ?? []).compactMap(Self.playlist)
+            let all = acc + page
+            let base = "https://api.spotify.com/v1"
+            if all.count < 200, let next = r["next"] as? String, next.hasPrefix(base) {
+                self.fetchPlaylists(String(next.dropFirst(base.count)), into: all); return
+            }
+            self.playlists = Array(all.prefix(200))
+            self.playlistsAt = Date()
+            self.playlistsLoading = false
+        }
+    }
+
+    /// One /me/playlists item → Playlist. The track count sits under `tracks.total`, or `items.total`
+    /// after Spotify's 2026 rename; both are read. Pure.
+    static func playlist(_ j: [String: Any]) -> Playlist? {
+        guard let id = j["id"] as? String, let uri = j["uri"] as? String else { return nil }
+        let total = ((j["tracks"] as? [String: Any])?["total"] as? Int) ?? ((j["items"] as? [String: Any])?["total"] as? Int)
+        let imgs = (j["images"] as? [[String: Any]]) ?? []
+        let thumb = imgs.min { ($0["width"] as? Int ?? .max) < ($1["width"] as? Int ?? .max) }?["url"] as? String
+        return Playlist(id: id, name: (j["name"] as? String) ?? "", uri: uri,
+                        owner: ((j["owner"] as? [String: Any])?["display_name"] as? String) ?? "",
+                        total: total, imageURL: thumb ?? "")
     }
 
     /// The configured device's id when Spotify lists it, else nil (quiet lookup).

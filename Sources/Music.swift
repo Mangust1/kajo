@@ -33,6 +33,7 @@ final class NowPlayingModel: ObservableObject {
     @Published var restarting = false
     @Published var volume: Double?        // 0…1, spotifyd only (its hook exports VOLUME 0…65535)
     @Published var upNext: [SpotifyWeb.QueueItem] = []   // spotifyd only: the play queue (up to ~20)
+    @Published var showPlaylists = false   // spotifyd only: the playlists slide-over is open (Esc closes it first)
     /// spotifyd mode: never AppleScript, launch or restart Spotify.app; controls go through the Web API.
     let spotifyd = musicSource == "spotifyd"
     let web: SpotifyWeb? = musicSource == "spotifyd" ? SpotifyWeb() : nil
@@ -637,6 +638,7 @@ struct SpotifyLinkField: View {
 private struct LinkTextField: NSViewRepresentable {
     let placeholder: String
     var onSubmit: (String) -> Bool
+    var onChange: ((String) -> Void)? = nil   // every edit (the playlists filter)
 
     func makeNSView(context: Context) -> NSTextField {
         let tf = NSTextField()
@@ -653,12 +655,18 @@ private struct LinkTextField: NSViewRepresentable {
         tf.delegate = context.coordinator
         return tf
     }
-    func updateNSView(_ tf: NSTextField, context: Context) { context.coordinator.onSubmit = onSubmit }
-    func makeCoordinator() -> Coordinator { Coordinator(onSubmit: onSubmit) }
+    func updateNSView(_ tf: NSTextField, context: Context) {
+        context.coordinator.onSubmit = onSubmit; context.coordinator.onChange = onChange
+    }
+    func makeCoordinator() -> Coordinator { Coordinator(onSubmit: onSubmit, onChange: onChange) }
 
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var onSubmit: (String) -> Bool
-        init(onSubmit: @escaping (String) -> Bool) { self.onSubmit = onSubmit }
+        var onChange: ((String) -> Void)?
+        init(onSubmit: @escaping (String) -> Bool, onChange: ((String) -> Void)?) { self.onSubmit = onSubmit; self.onChange = onChange }
+        func controlTextDidChange(_ n: Notification) {
+            if let tf = n.object as? NSTextField { onChange?(tf.stringValue) }
+        }
         func control(_ c: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
             guard sel == #selector(NSResponder.insertNewline(_:)), let tf = c as? NSTextField else { return false }
             if onSubmit(tf.stringValue) { tf.stringValue = "" }
@@ -687,6 +695,155 @@ private struct UpNextRow: View {
                 Spacer(minLength: 4)
                 Image(systemName: "forward.end.fill").font(.caption).foregroundStyle(Gruv.fg4)
                     .opacity(hovering ? 1 : 0)
+            }
+            .padding(6)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hovering ? Gruv.bg1 : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// Header-row button (Panel.swift, Music tab title row): toggles the playlists slide-over.
+struct PlaylistsButton: View {
+    @ObservedObject var model: NowPlayingModel
+    @ObservedObject var web: SpotifyWeb
+
+    var body: some View {
+        if web.hasToken {
+            Button { withAnimation(.spring(duration: 0.3)) { model.showPlaylists.toggle() } } label: {
+                Image(systemName: "music.note.list").font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(model.showPlaylists ? Gruv.aqua : Gruv.fg4)
+                    .frame(width: 26, height: 22).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Playlists")
+        }
+    }
+}
+
+/// spotifyd mode: the user's playlists, sliding in from the right over the Music tab (Panel.swift
+/// overlays it). Click = play on the configured device and close; right-click = Play / Shuffle play / Copy link.
+struct PlaylistsPanel: View {
+    @ObservedObject var model: NowPlayingModel
+    @ObservedObject var web: SpotifyWeb
+    @State private var filter = ""
+    @State private var busy = false
+
+    private var shown: [SpotifyWeb.Playlist] {
+        let f = filter.trimmingCharacters(in: .whitespaces)
+        return f.isEmpty ? web.playlists : web.playlists.filter { $0.name.localizedCaseInsensitiveContains(f) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Button { close() } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 13, weight: .semibold)).foregroundStyle(Gruv.fg2)
+                        .frame(width: 22, height: 22).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Text("Playlists").font(.system(size: 15, weight: .semibold)).foregroundStyle(Gruv.fg1)
+                if web.canReadPlaylists, !web.playlists.isEmpty {
+                    Text("\(web.playlists.count)").font(.caption.monospacedDigit()).foregroundStyle(Gruv.gray)
+                }
+                Spacer()
+                if web.playlistsLoading || busy { ProgressView().controlSize(.small) }
+            }
+            if web.canReadPlaylists {
+                HStack(spacing: 8) {
+                    Image(systemName: "line.3.horizontal.decrease").font(.caption).foregroundStyle(Gruv.fg4)
+                    LinkTextField(placeholder: "Filter playlists", onSubmit: { _ in false }, onChange: { filter = $0 })
+                }
+                .padding(.vertical, 7).padding(.horizontal, 10)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Gruv.bg1))
+                ScrollView(showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(shown) { p in
+                            PlaylistRow(playlist: p) { play(p, shuffle: false) }
+                                .contextMenu {
+                                    Button("Play") { play(p, shuffle: false) }
+                                    Button("Shuffle play") { play(p, shuffle: true) }
+                                    Button("Copy link") {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(p.link, forType: .string)
+                                    }
+                                }
+                        }
+                    }
+                    .padding(.bottom, 10)
+                }
+            } else {
+                VStack(spacing: 8) {
+                    Text("Kajo needs permission to read your playlists.")
+                        .font(.caption).foregroundStyle(Gruv.fg2).multilineTextAlignment(.center)
+                    Button { web.connect() } label: {
+                        HStack(spacing: 6) {
+                            if web.connecting { ProgressView().controlSize(.small) }
+                            Text(web.connecting ? "Waiting for the browser…" : "Reconnect Spotify")
+                        }
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(Gruv.green)
+                        .padding(.vertical, 7).padding(.horizontal, 16)
+                        .background(RoundedRectangle(cornerRadius: 9).fill(Gruv.green.opacity(0.15)))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(web.connecting)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 20)
+                Spacer(minLength: 0)
+            }
+            if !web.caption.isEmpty {
+                Text(web.caption).font(.caption).foregroundStyle(Gruv.orange).lineLimit(2)
+            }
+        }
+        .padding(.horizontal, 18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Gruv.bg0)
+        .overlay(alignment: .leading) { Rectangle().fill(Gruv.bg3.opacity(0.4)).frame(width: 1) }
+        .shadow(color: .black.opacity(0.35), radius: 8, x: -3)
+        .onAppear { web.loadPlaylists() }
+        .onChange(of: web.canReadPlaylists) { _, ok in if ok { web.loadPlaylists(force: true) } }
+    }
+
+    private func close() { withAnimation(.spring(duration: 0.3)) { model.showPlaylists = false } }
+
+    private func play(_ p: SpotifyWeb.Playlist, shuffle: Bool) {
+        guard !busy else { return }
+        busy = true
+        let done: (Bool) -> Void = { ok in
+            busy = false
+            if ok { close() }   // failure: the caption above explains, panel stays
+        }
+        if shuffle { web.shufflePlay(p.uri, done: done) } else { web.playContext(p.uri, done: done) }
+    }
+}
+
+private struct PlaylistRow: View {
+    let playlist: SpotifyWeb.Playlist
+    let action: () -> Void
+    @State private var hovering = false
+
+    private var detail: String {
+        [playlist.total.map { "\($0) tracks" }, playlist.owner.isEmpty ? nil : playlist.owner]
+            .compactMap { $0 }.joined(separator: " · ")
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                QueueThumb(url: playlist.imageURL)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(playlist.name).font(.callout.weight(.medium)).foregroundStyle(Gruv.fg1)
+                        .lineLimit(1).truncationMode(.tail)
+                    if !detail.isEmpty {
+                        Text(detail).font(.caption).foregroundStyle(Gruv.gray).lineLimit(1).truncationMode(.tail)
+                    }
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "play.fill").font(.caption).foregroundStyle(Gruv.fg4).opacity(hovering ? 1 : 0)
             }
             .padding(6)
             .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hovering ? Gruv.bg1 : .clear))

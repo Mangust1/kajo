@@ -66,13 +66,18 @@ struct PanelView: View {
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(state.tab.title)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Gruv.fg1)
-                .padding(.horizontal, 18)
-                .padding(.top, 18)
-                .padding(.bottom, 12)
+            HStack {
+                Text(state.tab.title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Gruv.fg1)
+                Spacer()
+                if state.tab == .music, let web = nowPlaying.web { PlaylistsButton(model: nowPlaying, web: web) }
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .padding(.bottom, 12)
 
+            VStack(spacing: 0) {
             Group {
                 switch state.tab {
                 case .calendar: CalendarTab(weather: weather, events: events)
@@ -96,6 +101,14 @@ struct PanelView: View {
             .padding(.horizontal, 18)
 
             Spacer()
+            }
+            // Music: the playlists slide-over covers the tab body (title row and its toggle stay visible).
+            .overlay {
+                if state.tab == .music, nowPlaying.showPlaylists, let web = nowPlaying.web {
+                    PlaylistsPanel(model: nowPlaying, web: web).transition(.move(edge: .trailing))
+                }
+            }
+            .clipped()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -930,6 +943,9 @@ final class PanelController {
             guard let self else { return event }
             if event.keyCode == 53 {                                            // Esc
                 if self.state.tab == .memes, self.memes.editingMeme != nil { self.memes.editingMeme = nil; return nil }
+                if self.state.tab == .music, self.nowPlaying.showPlaylists {             // Esc closes the playlists slide-over first
+                    withAnimation(.spring(duration: 0.3)) { self.nowPlaying.showPlaylists = false }; return nil
+                }
                 self.hide(); return nil
             }
             if self.state.tab == .memes, self.memes.editingMeme == nil,
