@@ -28,7 +28,7 @@ final class VPNModel: ObservableObject {
     @Published var nordvpn  = VPNEntry(id: "nd", name: "NordVPN", app: "NordVPN", active: false, ip: "")
     // OpenVPN is controllable like Tailscale: the `vpn` CLI (dotfiles/bin) talks to a root
     // openvpn LaunchDaemon over its management socket, so no sudo from a GUI app.
-    // vpn.json: { "profile": "weare", "vpnBin": "~/bin/vpn" }
+    // vpn.json: { "profile": "work", "vpnBin": "~/bin/vpn" }
     @Published var openvpnUp = false
     @Published var openvpnIP = ""
     @Published var openvpnBusy = false
@@ -48,7 +48,7 @@ final class VPNModel: ObservableObject {
 
     init() {
         let j = loadConfigJSON("vpn")
-        openvpnProfile = j["profile"] as? String ?? "weare"
+        openvpnProfile = j["profile"] as? String ?? "work"   // placeholder; the real profile lives in the local vpn.json
         vpnBin = ((j["vpnBin"] as? String) ?? "~/bin/vpn").replacingOccurrences(of: "~", with: NSHomeDirectory())
     }
 
