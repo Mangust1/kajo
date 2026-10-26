@@ -110,6 +110,9 @@ let spotifyDevice = (appConfig["spotifyDevice"] as? String) ?? "MacBook"
 // spotifyd only: after a Spotify-side session drop mid-song (sessiondisconnected → sessionconnected,
 // playback left stopped) start the same track again at the same spot. Needs a Web API token.
 let spotifyAutoResume = (appConfig["spotifyAutoResume"] as? Bool) ?? true
+// spotifyd only: launchd label of the user LaunchAgent running spotifyd. Kajo kickstarts it when the
+// device stays missing after a wake/network change (librespot can hang mid-login). "" = watchdog off.
+let spotifydLaunchLabel = ((appConfig["spotifydLaunchLabel"] as? String) ?? "fi.mangusti.spotifyd").trimmingCharacters(in: .whitespaces)
 
 // MARK: - Launch another app + dismiss the panel
 

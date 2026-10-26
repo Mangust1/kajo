@@ -41,6 +41,20 @@ final class NowPlayingModel: ObservableObject {
     let spotifyd = musicSource == "spotifyd"
     let web: SpotifyWeb? = musicSource == "spotifyd" ? SpotifyWeb() : nil
     let zeroconf = SpotifyZeroconf()   // device picker's "On your network" (idle until the picker opens)
+    /// Apple Music mode ("musicSource": "applemusic"): Music.app's playerInfo notification + AppleScript.
+    /// Opening the tab never launches Music (every script checks `is running` first); play/pause may.
+    let appleMusic = musicSource == "applemusic"
+    @Published var shuffleOn = false        // applemusic: Music's `shuffle enabled`
+    @Published var repeatMode = "off"       // applemusic: Music's `song repeat` (off | one | all)
+    @Published var musicPlaylists: [LibraryItem] = []   // applemusic: Playlists slide-over
+    @Published var musicBusy = false        // applemusic: a library script is running
+    @Published var musicCaption = ""        // applemusic: library errors, shown by the slide-overs
+    private var musicTrackKey = ""          // applemusic: name/artist/album of the shown track (artwork reload)
+    private var exportSub: AnyCancellable?  // nowplaying.json for SketchyBar (all sources)
+    @Published var musicNext: [LibraryItem] = []   // applemusic: next tracks of the current playlist (up to 25)
+    @Published var musicNextNote = ""       // applemusic: muted caption instead of the list (shuffle on)
+    var musicNextKey = ""                   // track|shuffle|repeat the list was last read for
+    var musicNextGen = 0                    // drops stale list reads
     private var positionBase: Double = 0     // last real position we were told…
     private var positionAt = Date.distantPast  // …and when; the 1.5 s timer extrapolates from these
 
@@ -49,7 +63,14 @@ final class NowPlayingModel: ObservableObject {
     private var lastNotification: Date?   // Spotify's own PlaybackStateChanged — needs no Automation grant
 
     init() {
-        if spotifyd { watchSpotifydState(); return }
+        startNowPlayingExport()
+        if spotifyd { watchSpotifydState(); startWatchdog(); return }
+        if appleMusic {   // posted by Music on every play/pause/track change; needs no Automation grant
+            DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name("com.apple.Music.playerInfo"), object: nil, queue: .main
+            ) { [weak self] n in self?.applyMusicNotification(n.userInfo) }
+            return
+        }
         // Same source SketchyBar uses. Keeps the tab alive when AppleScript to Spotify is denied (TCC -1743).
         DistributedNotificationCenter.default().addObserver(
             forName: NSNotification.Name("com.spotify.client.PlaybackStateChanged"), object: nil, queue: .main
@@ -126,22 +147,51 @@ final class NowPlayingModel: ObservableObject {
             return
         }
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.refresh() }
+        if appleMusic { musicNextKey = "" }   // tab open: re-read Next in playlist on the first refresh
     }
 
     func stopPolling() { timer?.invalidate(); timer = nil; tabOpen = false; queuePending?.cancel() }
 
-    /// spotifyd: refresh "Next" — on tab open and after track changes while the tab is open. No timer.
+    /// spotifyd: refresh "Next" — on tab open, after track changes, `start` events and a session
+    /// reconnect while the tab is open. No timer. A failed or empty read while playing retries at
+    /// +2 s, then +5 s (max 2 per trigger; a newer trigger supersedes the chain): after a session
+    /// drop Spotify answers empty/errors for a while and nothing else would re-ask.
     private var tabOpen = false
     private var queuePending: DispatchWorkItem?
-    private func refreshQueue(after delay: Double = 0) {
+    private var queueGen = 0             // bumped per trigger: stale responses don't schedule retries
+    private var emptyQueueStreak = 0     // consecutive 200-with-empty answers
+    private static let queueRetryDelays: [Double] = [2, 5]
+
+    private func refreshQueue(after delay: Double = 0, retry: Int = 0) {
         guard let web, web.hasToken else { return }
         queuePending?.cancel()
+        if retry == 0 { queueGen += 1 }
+        let gen = queueGen
         let w = DispatchWorkItem { [weak self] in
             guard let self, self.tabOpen else { return }
-            web.queue { [weak self] items in self?.setQueue(items) }   // errors: list just stays
+            web.queue { [weak self] items in
+                guard let self, self.applyQueue(items), gen == self.queueGen, self.tabOpen, self.isPlaying,
+                      retry < Self.queueRetryDelays.count else { return }
+                self.refreshQueue(after: Self.queueRetryDelays[retry], retry: retry + 1)
+            }
         }
         queuePending = w
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: w)
+    }
+
+    /// Apply one queue read; returns true when it was a failure or empty (worth a retry). A failed
+    /// call never touches the list; an empty one clears it only on the second empty 200 in a row.
+    @discardableResult
+    private func applyQueue(_ items: [SpotifyWeb.QueueItem]?) -> Bool {
+        guard let items else { return true }
+        if items.isEmpty {
+            emptyQueueStreak += 1
+            if emptyQueueStreak >= 2 { setQueue([]) }
+            return true
+        }
+        emptyQueueStreak = 0
+        setQueue(items)
+        return false
     }
 
     /// Jump to shown queue row `index` (0-based) = its position in Spotify's queue + 1 × next; see
@@ -152,6 +202,20 @@ final class NowPlayingModel: ObservableObject {
         let raw = upNextRaw[index]
         rawQueue.prefix(raw).forEach { skipIDs[Self.itemID($0.uri)] = nil }
         web?.skip(raw + 1)
+    }
+
+    /// Shuffle toggle; on success re-read Up next at 0.8 s and 2.5 s (Spotify reorders the queue
+    /// server-side and its response lags). No local reorder: the list shows what Spotify returns.
+    func toggleShuffle() {
+        web?.toggleShuffle { [weak self] ok in
+            guard ok, let self, let web = self.web else { return }
+            for delay in [0.8, 2.5] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self, self.tabOpen else { return }
+                    web.queue { [weak self] items in self?.applyQueue(items) }
+                }
+            }
+        }
     }
 
     // MARK: Remove from queue (local skip list)
@@ -261,13 +325,15 @@ final class NowPlayingModel: ObservableObject {
 
     func refresh() {
         if spotifyd { reloadSpotifydState(); return }
+        if appleMusic, !musicRunning { applyMusicApp([]); return }   // no osascript spawn while Music is closed
         guard !inFlight else { return }   // Spotify not answering AppleEvents must not stack osascripts every 1.5 s
         inFlight = true
-        let script = infoScript
+        let script = appleMusic ? musicInfoScript : infoScript
+        let am = appleMusic
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let out = NowPlayingModel.runOSA(script) ?? ""
             let lines = out.components(separatedBy: "\n")
-            DispatchQueue.main.async { self?.inFlight = false; self?.apply(lines) }
+            DispatchQueue.main.async { self?.inFlight = false; if am { self?.applyMusicApp(lines) } else { self?.apply(lines) } }
         }
     }
 
@@ -303,7 +369,7 @@ final class NowPlayingModel: ObservableObject {
 
     /// Quit Spotify and launch it again. Spotify does not resume playback by itself afterwards.
     func restartSpotify() {
-        guard !spotifyd, !restarting else { return }
+        guard !spotifyd, !appleMusic, !restarting else { return }
         restarting = true
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: Self.spotifyID)
         apps.forEach { _ = $0.terminate() }
@@ -378,13 +444,41 @@ final class NowPlayingModel: ObservableObject {
 
     func playPause() {
         resumeArmed = nil   // a user action wins over auto-resume
-        if let web { isPlaying ? web.pause() : web.play() } else { control("playpause") }
+        if let web {
+            let wantPlay = !isPlaying
+            lastAction = (wantPlay, Date())
+            wantPlay ? web.play() : web.pause()
+        } else { control("playpause", launch: appleMusic) }   // Apple Music: the play button may launch Music
+    }
+
+    // MARK: spotifyd watchdog (see SpotifydWatchdog.swift)
+    private var watchdog: SpotifydWatchdog?
+    private var lastAction: (play: Bool, at: Date)?   // last play/pause press
+    private var lastMissAt = Date.distantPast         // last "device not found" from the Web API
+
+    private func startWatchdog() {
+        guard let web, !spotifydLaunchLabel.isEmpty else { return }
+        let w = SpotifydWatchdog(label: spotifydLaunchLabel, web: web)
+        w.onRecovered = { [weak self] in
+            // A play/pause that failed with "not found" while the tab is open: retry it once.
+            guard let self, let a = self.lastAction, self.tabOpen, self.lastMissAt >= a.at,
+                  Date().timeIntervalSince(a.at) < 120, let web = self.web else { return }
+            self.lastAction = nil
+            a.play ? web.play() : web.pause()
+        }
+        web.onDeviceMissing = { [weak self, weak w] in
+            self?.lastMissAt = Date()
+            w?.schedule(after: 0)
+        }
+        watchdog = w
     }
     func next()      { resumeArmed = nil; if let web { web.next() } else { control("next track") } }
     func previous()  { resumeArmed = nil; if let web { web.previous() } else { control("previous track") } }
 
-    private func control(_ cmd: String) {
-        let script = "if application \"Spotify\" is running then tell application \"Spotify\" to \(cmd)"
+    private func control(_ cmd: String, launch: Bool = false) {
+        let app = appleMusic ? "Music" : "Spotify"
+        let script = launch ? "tell application \"\(app)\" to \(cmd)"
+                            : "if application \"\(app)\" is running then tell application \"\(app)\" to \(cmd)"
         DispatchQueue.global(qos: .utility).async { [weak self] in
             _ = NowPlayingModel.runOSA(script)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self?.refresh() }
@@ -440,6 +534,9 @@ final class NowPlayingModel: ObservableObject {
         if let v = Double(str("VOLUME")) { volume = min(1, max(0, v / 65535)) }
 
         noteSessionEvent(event, at: at, volumeBefore: volumeBefore)
+        // Fields persist in the file, so only the event that carries them is fresh. REPEAT: none|all|track.
+        if event == "shuffle_changed", let web { web.shuffleState = str("SHUFFLE") == "true" }
+        if event == "repeat_changed", let web { web.repeatState = ["all": "context", "track": "track"][str("REPEAT")] ?? "off" }
         learnVolume(before: volumeBefore)
         let name = str("TRACK_NAME")
         guard !name.isEmpty, !["stop", "sessiondisconnected"].contains(event) else {
@@ -457,6 +554,8 @@ final class NowPlayingModel: ObservableObject {
             trackID = id; artist = ""; album = ""; positionAt = .distantPast   // new track starts at 0 unless the event says otherwise
             web?.noteContext(trackID: id)   // playlist/album context for auto-resume
             if tabOpen, ["change", "load", "start"].contains(event) { refreshQueue(after: 2) }   // Spotify's queue lags the change
+        } else if tabOpen, event == "start" {
+            refreshQueue(after: 2)   // same track restarted (auto-resume, play after pause): the queue may have been read mid-drop
         }
         title = name
         let duration = (Double(str("TRACK_DURATION")) ?? 0) / 1000
@@ -513,6 +612,12 @@ final class NowPlayingModel: ObservableObject {
             connectedAt = Date()
             if resumeArmed != nil { fireResume() }   // the resume restores lastVolume itself
             else if let v = Self.lastVolume, let web, web.hasToken { web.restoreVolume(v) }
+            if tabOpen, let web, web.hasToken {   // a read during the drop came back empty/failed: re-read once the device is back
+                web.waitForDevice(named: web.deviceName) { [weak self] d in
+                    guard d != nil, let self, self.tabOpen else { return }
+                    self.refreshQueue(after: 1)
+                }
+            }
         case "start":
             resumeArmed = nil   // playing again by other means (spotifyd itself, another client)
         default: break
@@ -563,6 +668,412 @@ final class NowPlayingModel: ObservableObject {
     }
 }
 
+// MARK: - nowplaying.json export (SketchyBar's music item, any source)
+// <kajoConfigDir>/nowplaying.json = {"source","playing","title","artist","album","ts"}, written tmp + rename
+// only when the track or play state changed (position ticks never write), then
+// `sketchybar --trigger kajo_nowplaying`. Stopped / nothing loaded = playing false, empty strings.
+
+extension NowPlayingModel {
+    private struct Exported: Equatable { let playing: Bool; let title: String; let artist: String; let album: String }
+
+    fileprivate func startNowPlayingExport() {
+        exportSub = Publishers.CombineLatest(Publishers.CombineLatest4($hasTrack, $isPlaying, $title, $artist), $album)
+            .map { a, album in
+                a.0 ? Exported(playing: a.1, title: a.2, artist: a.3, album: album)
+                    : Exported(playing: false, title: "", artist: "", album: "")
+            }
+            .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)   // a refresh sets the fields one by one
+            .removeDuplicates()
+            .sink { e in DispatchQueue.global(qos: .utility).async { Self.writeNowPlaying(e) } }
+    }
+
+    private static func writeNowPlaying(_ e: Exported) {
+        let obj: [String: Any] = ["source": musicSource, "playing": e.playing, "title": e.title,
+                                  "artist": e.artist, "album": e.album, "ts": Int(Date().timeIntervalSince1970)]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { return }
+        let path = kajoConfigDir + "/nowplaying.json"
+        let tmp = path + ".tmp"
+        guard FileManager.default.createFile(atPath: tmp, contents: data),
+              rename(tmp, path) == 0 else { return }
+        let bar = "/opt/homebrew/bin/sketchybar"
+        guard FileManager.default.isExecutableFile(atPath: bar) else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: bar)
+        p.arguments = ["--trigger", "kajo_nowplaying"]
+        try? p.run()
+    }
+}
+
+// MARK: - Apple Music source ("musicSource": "applemusic")
+// Now playing comes from Music's `com.apple.Music.playerInfo` distributed notification (keys "Player
+// State" Playing/Paused/Stopped, "Name", "Artist", "Album", "Total Time" ms; no position), so the ear
+// works without an Automation grant. Position, volume, shuffle/repeat and artwork come from
+// AppleScript while the tab is open; denial (-1743/-1744) surfaces as ERR<code> like the Spotify path.
+
+/// A Music library row (playlist or track) for the slide-overs; `id` = Music's persistent ID.
+struct LibraryItem: Identifiable { let id: String; let title: String; let detail: String }
+
+extension NowPlayingModel {
+    static let musicID = "com.apple.Music"
+    static let automationSettingsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+    static let musicDeniedText = "Allow Kajo to control Music in System Settings → Privacy & Security → Automation."
+
+    var musicRunning: Bool { !NSRunningApplication.runningApplications(withBundleIdentifier: Self.musicID).isEmpty }
+
+    fileprivate var musicInfoScript: String { """
+    set out to ""
+    try
+    \tif application "Music" is running then
+    \t\ttell application "Music"
+    \t\t\tset ps to player state as string
+    \t\t\tset out to ps & linefeed & (sound volume as text) & linefeed & (shuffle enabled as text) & linefeed & (song repeat as text)
+    \t\t\tif ps is not "stopped" then
+    \t\t\t\tset t to current track
+    \t\t\t\tset out to out & linefeed & (name of t) & linefeed & (artist of t) & linefeed & (album of t) & linefeed & ((duration of t) as text) & linefeed & ((player position) as text)
+    \t\t\tend if
+    \t\tend tell
+    \tend if
+    on error errMsg number errNum
+    \treturn "ERR" & errNum
+    end try
+    return out
+    """ }
+
+    private func clearMusicTrack() {
+        hasTrack = false; isPlaying = false
+        title = ""; artist = ""; album = ""; artwork = nil; musicTrackKey = ""
+        setPosition(0, duration: 0)
+        musicNext = []; musicNextNote = ""; musicNextKey = ""
+    }
+
+    fileprivate func applyMusicNotification(_ info: [AnyHashable: Any]?) {
+        guard let info else { return }
+        #if DEBUG
+        NSLog("Kajo: com.apple.Music.playerInfo %@", info.description)
+        #endif
+        lastNotification = Date()
+        let state = (info["Player State"] as? String ?? "").lowercased()
+        guard state != "stopped", let name = info["Name"] as? String, !name.isEmpty else { clearMusicTrack(); return }
+        tick()   // bring the extrapolated position up to now before the play state flips
+        hasTrack = true
+        isPlaying = state == "playing"
+        title = name
+        artist = info["Artist"] as? String ?? ""
+        album = info["Album"] as? String ?? ""
+        let dur = ((info["Total Time"] as? NSNumber)?.doubleValue ?? 0) / 1000
+        let key = "\(name)\u{1}\(artist)\u{1}\(album)"
+        if key != musicTrackKey {
+            musicTrackKey = key
+            artwork = nil
+            setPosition(0, duration: dur)
+            loadMusicArtwork(key)
+        } else {
+            setPosition(positionSec, duration: dur > 0 ? dur : durationSec)   // no position in the notification: keep the extrapolated one
+        }
+        if timer != nil { refresh() }   // tab open: read the real position now
+    }
+
+    fileprivate func applyMusicApp(_ lines: [String]) {
+        if let first = lines.first, first.hasPrefix("ERR") {
+            automationDenied = ["ERR-1743", "ERR-1744"].contains(first) && musicRunning
+            tick()
+            return
+        }
+        automationDenied = false
+        guard lines.count >= 4, !lines[0].isEmpty else { clearMusicTrack(); return }   // Music not running
+        volume = Double(lines[1]).map { min(1, max(0, $0 / 100)) }
+        shuffleOn = lines[2] == "true"
+        repeatMode = lines[3]
+        guard lines.count >= 9 else { clearMusicTrack(); return }   // stopped
+        func num(_ s: String) -> Double { Double(s.replacingOccurrences(of: ",", with: ".")) ?? 0 }   // Finnish locale: 235,19
+        hasTrack = true
+        isPlaying = lines[0] == "playing"
+        title = lines[4]; artist = lines[5]; album = lines[6]
+        setPosition(num(lines[8]), duration: num(lines[7]))
+        let key = "\(title)\u{1}\(artist)\u{1}\(album)"
+        if key != musicTrackKey { musicTrackKey = key; artwork = nil; loadMusicArtwork(key) }
+        // Track change (the notification triggers this refresh), shuffle/repeat toggle or tab open.
+        let nextKey = "\(key)\u{1}\(shuffleOn)\u{1}\(repeatMode)"
+        if timer != nil, nextKey != musicNextKey { musicNextKey = nextKey; loadMusicNext() }
+    }
+
+    // MARK: Next in playlist
+    // ponytail: Music's real Up Next queue isn't scriptable, so this is the rest of `current playlist`
+    // after the current track (playlist order; unchecked tracks skipped; `song repeat` all wraps).
+    // With shuffle on Music doesn't reveal its shuffled order, so only a caption shows.
+    // Upgrade path: none via AppleScript; MusicKit's ApplicationMusicPlayer.queue is a different player.
+    private static let musicNextScript = """
+    set out to ""
+    try
+    \tif application "Music" is not running then return ""
+    \ttell application "Music"
+    \t\tif player state is stopped then return ""
+    \t\tif shuffle enabled then return "SHUFFLE"
+    \t\tset rep to song repeat as string
+    \t\ttry
+    \t\t\tset p to current playlist
+    \t\ton error
+    \t\t\treturn ""
+    \t\tend try
+    \t\tset cid to persistent ID of current track
+    \t\tset ids to persistent ID of every track of p
+    \t\tset n to count of ids
+    \t\tset idx to 0
+    \t\ttry
+    \t\t\tset i to index of current track
+    \t\t\tif i ≤ n and item i of ids is cid then set idx to i
+    \t\tend try
+    \t\tif idx is 0 then
+    \t\t\trepeat with i from 1 to n
+    \t\t\t\tif item i of ids is cid then
+    \t\t\t\t\tset idx to i
+    \t\t\t\t\texit repeat
+    \t\t\t\tend if
+    \t\t\tend repeat
+    \t\tend if
+    \t\tif idx is 0 then return ""
+    \t\tset out to "OK" & linefeed
+    \t\tset got to 0
+    \t\tset i to idx
+    \t\trepeat (n - 1) times
+    \t\t\tset i to i + 1
+    \t\t\tif i > n then
+    \t\t\t\tif rep is not "all" then exit repeat
+    \t\t\t\tset i to 1
+    \t\t\tend if
+    \t\t\tset t to track i of p
+    \t\t\tif enabled of t then
+    \t\t\t\tset out to out & (item i of ids) & tab & (name of t) & tab & (artist of t) & tab & (album of t) & linefeed
+    \t\t\t\tset got to got + 1
+    \t\t\t\tif got ≥ 25 then exit repeat
+    \t\t\tend if
+    \t\tend repeat
+    \tend tell
+    on error errMsg number errNum
+    \treturn "ERR" & errNum
+    end try
+    return out
+    """
+
+    /// One osascript off the main thread (~0.1–0.2 s for a 50-track playlist). Errors, no playlist
+    /// context or a track outside it → no list.
+    private func loadMusicNext() {
+        musicNextGen += 1
+        let gen = musicNextGen
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let out = NowPlayingModel.runOSA(Self.musicNextScript)?.trimmingCharacters(in: .newlines) ?? ""
+            DispatchQueue.main.async {
+                guard let self, gen == self.musicNextGen else { return }
+                self.musicNextNote = out == "SHUFFLE" ? "Shuffle is on — Music doesn't reveal the shuffled order" : ""
+                guard out.hasPrefix("OK") else { self.musicNext = []; return }
+                self.musicNext = out.split(separator: "\n").dropFirst().map { $0.components(separatedBy: "\t") }
+                    .filter { $0.count >= 3 }
+                    .map { r in LibraryItem(id: r[0], title: r[1], detail: [r[2], r.count > 3 ? r[3] : ""].filter { !$0.isEmpty }.joined(separator: " · ")) }
+            }
+        }
+    }
+
+    /// Row click / "Play now": play that track of the current playlist, keeping the playlist context.
+    func playMusicNext(_ id: String) { playMusic("first track of current playlist whose persistent ID is (item 1 of argv)", id) }
+    func revealMusicNext(_ id: String) {
+        control("reveal (first track of current playlist whose persistent ID is \"\(id.filter { $0.isHexDigit })\")")
+        AppLauncher.open(Self.musicID)   // bring Music forward to show it (closes the panel)
+    }
+
+    /// Thumbnail for a Next row (~0.1 s per track, measured), serialised so 25 rows don't fire 25
+    /// osascripts at once; `QueueThumb` caches the result by persistent ID.
+    private static let musicArtQueue = DispatchQueue(label: "kajo.music-next-art", qos: .utility)
+    static func musicTrackArtwork(_ id: String) async -> NSImage? {
+        let script = """
+        on run argv
+        \ttry
+        \t\ttell application "Music"
+        \t\t\tset t to first track of current playlist whose persistent ID is (item 1 of argv)
+        \t\t\tif (count of artworks of t) is 0 then return "NOART"
+        \t\t\tset d to raw data of artwork 1 of t
+        \t\tend tell
+        \t\tset f to open for access (POSIX file (item 2 of argv)) with write permission
+        \t\tset eof f to 0
+        \t\twrite d to f
+        \t\tclose access f
+        \t\treturn "OK"
+        \ton error errMsg number errNum
+        \t\ttry
+        \t\t\tclose access (POSIX file (item 2 of argv))
+        \t\tend try
+        \t\treturn "ERR" & errNum
+        \tend try
+        end run
+        """
+        return await withCheckedContinuation { cont in
+            musicArtQueue.async {
+                guard !NSRunningApplication.runningApplications(withBundleIdentifier: musicID).isEmpty else { cont.resume(returning: nil); return }
+                let path = NSTemporaryDirectory() + "kajo-music-next-\(UUID().uuidString)"
+                let out = shell("/usr/bin/osascript", ["-e", script, id, path])?.trimmingCharacters(in: .whitespacesAndNewlines)
+                var img: NSImage?
+                if out == "OK", let full = NSImage(contentsOfFile: path),   // shrink: the files are ~1200 px
+                   let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 72, pixelsHigh: 72, bitsPerSample: 8,
+                                              samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                              bytesPerRow: 0, bitsPerPixel: 0),
+                   let ctx = NSGraphicsContext(bitmapImageRep: rep) {
+                    NSGraphicsContext.saveGraphicsState()
+                    NSGraphicsContext.current = ctx
+                    full.draw(in: NSRect(x: 0, y: 0, width: 72, height: 72))
+                    NSGraphicsContext.restoreGraphicsState()
+                    let small = NSImage(size: NSSize(width: 72, height: 72))
+                    small.addRepresentation(rep)
+                    img = small
+                }
+                try? FileManager.default.removeItem(atPath: path)
+                cont.resume(returning: img)
+            }
+        }
+    }
+
+    /// Cover art: Music writes `raw data of artwork 1` to a temp file (osascript can't hand binary
+    /// back on stdout). No art, an error or a denied grant → the iTunes Search fallback.
+    private func loadMusicArtwork(_ key: String) {
+        let path = NSTemporaryDirectory() + "kajo-music-art-\(UUID().uuidString)"
+        let script = """
+        on run argv
+        \ttry
+        \t\tif application "Music" is running then
+        \t\t\ttell application "Music"
+        \t\t\t\tif player state is stopped then return ""
+        \t\t\t\tif (count of artworks of current track) is 0 then return "NOART"
+        \t\t\t\tset d to raw data of artwork 1 of current track
+        \t\t\tend tell
+        \t\t\tset f to open for access (POSIX file (item 1 of argv)) with write permission
+        \t\t\tset eof f to 0
+        \t\t\twrite d to f
+        \t\t\tclose access f
+        \t\t\treturn "OK"
+        \t\tend if
+        \ton error errMsg number errNum
+        \t\ttry
+        \t\t\tclose access (POSIX file (item 1 of argv))
+        \t\tend try
+        \t\treturn "ERR" & errNum
+        \tend try
+        \treturn ""
+        end run
+        """
+        let (t, a, al) = (title, artist, album)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let out = shell("/usr/bin/osascript", ["-e", script, path])?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let img = out == "OK" ? NSImage(contentsOfFile: path) : nil
+            try? FileManager.default.removeItem(atPath: path)
+            DispatchQueue.main.async {
+                guard let self, self.musicTrackKey == key else { return }
+                if let img { self.artwork = img } else { self.fetchArtworkFallback(track: t, artist: a, album: al) }
+            }
+        }
+    }
+
+    // MARK: controls (optimistic; the 0.25 s refresh in control() corrects them)
+    func setMusicVolume(_ v: Double) { volume = v; control("set sound volume to \(Int((v * 100).rounded()))") }
+    func seekMusic(to fraction: Double) {
+        guard durationSec > 0 else { return }
+        let s = min(durationSec, max(0, fraction * durationSec))
+        setPosition(s, duration: durationSec)
+        control("set player position to \(s)")
+    }
+    func toggleMusicShuffle() { shuffleOn.toggle(); control("set shuffle enabled to \(shuffleOn)") }
+    func cycleMusicRepeat() {
+        repeatMode = ["off": "all", "all": "one"][repeatMode] ?? "off"
+        control("set song repeat to \(repeatMode)")
+    }
+
+    // MARK: library (Playlists / Search slide-overs)
+    /// Run a library script (argv passed separately, so queries need no escaping); ERR codes → caption.
+    private func musicScript(_ script: String, _ args: [String] = [], done: @escaping (String?) -> Void) {
+        guard musicRunning else { musicCaption = "Music isn't running."; done(nil); return }
+        musicBusy = true; musicCaption = ""
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let out = shell("/usr/bin/osascript", ["-e", script] + args)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "ERR"
+            DispatchQueue.main.async {
+                self?.musicBusy = false
+                guard out.hasPrefix("ERR") else { done(out); return }
+                self?.musicCaption = ["ERR-1743", "ERR-1744"].contains(out) ? Self.musicDeniedText : "Music didn't answer (\(out.dropFirst(3)))."
+                done(nil)
+            }
+        }
+    }
+
+    private func rows(_ out: String) -> [[String]] {
+        out.split(separator: "\n").map { $0.components(separatedBy: "\t") }.filter { $0.count >= 3 }
+    }
+
+    /// `user playlists whose special kind is none`: drops the Library ("Music") and folders.
+    func loadMusicPlaylists() {
+        let script = """
+        set out to ""
+        try
+        \ttell application "Music"
+        \t\trepeat with p in (get user playlists whose special kind is none)
+        \t\t\tset out to out & (persistent ID of p) & tab & (name of p) & tab & ((count of tracks of p) as text) & linefeed
+        \t\tend repeat
+        \tend tell
+        on error errMsg number errNum
+        \treturn "ERR" & errNum
+        end try
+        return out
+        """
+        musicScript(script) { [weak self] out in
+            guard let out, let self else { return }
+            self.musicPlaylists = self.rows(out).map { LibraryItem(id: $0[0], title: $0[1], detail: "\($0[2]) tracks") }
+        }
+    }
+
+    /// Library song search, first 25 hits.
+    func searchMusic(_ q: String, done: @escaping ([LibraryItem]?) -> Void) {
+        let script = """
+        on run argv
+        \tset out to ""
+        \ttry
+        \t\ttell application "Music"
+        \t\t\tset r to search library playlist 1 for (item 1 of argv) only songs
+        \t\t\tset n to count of r
+        \t\t\tif n > 25 then set n to 25
+        \t\t\trepeat with i from 1 to n
+        \t\t\t\tset t to item i of r
+        \t\t\t\tset out to out & (persistent ID of t) & tab & (name of t) & tab & (artist of t) & tab & (album of t) & linefeed
+        \t\t\tend repeat
+        \t\tend tell
+        \ton error errMsg number errNum
+        \t\treturn "ERR" & errNum
+        \tend try
+        \treturn out
+        end run
+        """
+        musicScript(script, [q]) { [weak self] out in
+            guard let out, let self else { done(nil); return }
+            done(self.rows(out).map { r in
+                LibraryItem(id: r[0], title: r[1], detail: [r[2], r.count > 3 ? r[3] : ""].filter { !$0.isEmpty }.joined(separator: " · "))
+            })
+        }
+    }
+
+    func playMusicPlaylist(_ id: String) { playMusic("first user playlist whose persistent ID is (item 1 of argv)", id) }
+    func playMusicTrack(_ id: String) { playMusic("first track of library playlist 1 whose persistent ID is (item 1 of argv)", id) }
+
+    private func playMusic(_ ref: String, _ id: String) {
+        let script = """
+        on run argv
+        \ttry
+        \t\ttell application "Music" to play (\(ref))
+        \ton error errMsg number errNum
+        \t\treturn "ERR" & errNum
+        \tend try
+        \treturn "OK"
+        end run
+        """
+        musicScript(script, [id]) { [weak self] out in
+            if out != nil { self?.closeSlideOver(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self?.refresh() } }
+        }
+    }
+}
+
 struct MusicTab: View {
     @ObservedObject var model: NowPlayingModel
 
@@ -582,6 +1093,14 @@ struct MusicTab: View {
                     UpNextList(model: model, web: web)   // fills the middle when non-empty
                     Spacer(minLength: 0)
                     SpotifyLinkField(model: model, web: web)   // pinned to the bottom
+                } else if model.appleMusic {
+                    if model.automationDenied { musicDeniedNotice } else { MusicAppControls(model: model) }
+                    // ponytail: Music.app's Up Next isn't scriptable; NEXT IN PLAYLIST is the rest of the current
+                    // playlist instead. No device picker either: AirPlay routing is scriptable (`AirPlay devices`,
+                    // `current AirPlay devices`); upgrade path = a picker over those.
+                    if !model.automationDenied { MusicNextList(model: model) }
+                    openSpotifyButton   // under the list, which takes the height left (else right under the controls)
+                    Spacer(minLength: 0)
                 } else {
                     if model.automationDenied { deniedNotice } else { controls }
                     if !model.spotifyd { openSpotifyButton }
@@ -595,7 +1114,11 @@ struct MusicTab: View {
                     .frame(height: 150)
                     .overlay(Image(systemName: "music.note").font(.largeTitle).foregroundStyle(Gruv.gray))
                 Text(model.spotifyd ? "Nothing playing on \(spotifyDevice)" : "Nothing playing").font(.headline).foregroundStyle(Gruv.fg2)
-                if let web = model.web { SpotifydControls(model: model, web: web) } else { openSpotifyButton }
+                if let web = model.web { SpotifydControls(model: model, web: web) }
+                else if model.appleMusic {
+                    if model.automationDenied { musicDeniedNotice } else { MusicAppControls(model: model) }
+                    openSpotifyButton
+                } else { openSpotifyButton }
                 Spacer()
                 if let web = model.web { SpotifyLinkField(model: model, web: web) }
             }
@@ -603,10 +1126,10 @@ struct MusicTab: View {
     }
 
     private var openSpotifyButton: some View {
-        Button { AppLauncher.open("com.spotify.client") } label: {
+        Button { AppLauncher.open(model.appleMusic ? NowPlayingModel.musicID : "com.spotify.client") } label: {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.up.forward.app")
-                Text("Open Spotify")
+                Text(model.appleMusic ? "Open Music" : "Open Spotify")
             }
             .font(.callout.weight(.medium))
             .foregroundStyle(Gruv.aqua)
@@ -637,8 +1160,13 @@ struct MusicTab: View {
                 Capsule().fill(Gruv.bg3.opacity(0.5))
                 Capsule().fill(Gruv.green).frame(width: geo.size.width * model.progress)
             }
+            .frame(height: 4)
+            .frame(maxHeight: .infinity)   // centred in a 14 pt hit area
+            .contentShape(Rectangle())
+            .onTapGesture { loc in if model.appleMusic { model.seekMusic(to: loc.x / max(1, geo.size.width)) } }   // click to seek (Apple Music only)
         }
-        .frame(height: 4)
+        .frame(height: 14)
+        .padding(.vertical, -5)   // lays out as the old 4 pt bar
     }
 
     private var timeRow: some View {
@@ -655,6 +1183,23 @@ struct MusicTab: View {
     private func mmss(_ s: Double) -> String {
         let t = Int(s.rounded(.down))
         return String(format: "%d:%02d", t / 60, t % 60)
+    }
+
+    /// Apple Music: AppleEvents to Music refused (-1743/-1744). Unlike Spotify this is a real TCC denial.
+    private var musicDeniedNotice: some View {
+        VStack(spacing: 8) {
+            Text(NowPlayingModel.musicDeniedText)
+                .font(.caption).foregroundStyle(Gruv.fg2).multilineTextAlignment(.center)
+            Button { AppLauncher.openURL(NowPlayingModel.automationSettingsURL) } label: {
+                Text("Open Automation settings")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(Gruv.yellow)
+                    .padding(.vertical, 7).padding(.horizontal, 16)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(Gruv.yellow.opacity(0.15)))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.top, 2)
     }
 
     /// Shown instead of the controls while AppleEvents to Spotify are refused (see automationDenied).
@@ -726,6 +1271,7 @@ struct UpNextList: View {
                         }
                     }
                     .padding(.bottom, 10)   // last row clears the fade below
+                    .animation(.easeInOut, value: model.upNext.map(\.uri))   // reshuffle after the shuffle toggle
                 }
                 // Subtle fade at the bottom edge so a cut-off row reads as "scroll for more".
                 .mask(VStack(spacing: 0) {
@@ -735,6 +1281,42 @@ struct UpNextList: View {
             }
             // Full width = same edges as the progress bar; the hover background reaches them.
             // Takes the height left under the controls (layoutPriority beats MusicTab's Spacer).
+            .frame(maxHeight: .infinity, alignment: .top)
+            .layoutPriority(1)
+        }
+    }
+}
+
+/// Apple Music mode: the rest of the current playlist (Music's own Up Next isn't scriptable), in the
+/// UP NEXT look. Rows are lazy so artwork is only fetched for rows scrolled into view.
+struct MusicNextList: View {
+    @ObservedObject var model: NowPlayingModel
+
+    var body: some View {
+        if !model.musicNextNote.isEmpty {
+            Text(model.musicNextNote).font(.caption).foregroundStyle(Gruv.gray)
+                .multilineTextAlignment(.center).padding(.top, 4)
+        } else if !model.musicNext.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                SectionHeader(text: "NEXT IN PLAYLIST")
+                ScrollView(showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(model.musicNext) { t in
+                            MediaRow(title: t.title, detail: t.detail, imageURL: "applemusic:\(t.id)", hoverSymbol: "play.fill") { model.playMusicNext(t.id) }
+                                .contextMenu {
+                                    // ponytail: no "Play next" — Music's Up Next isn't scriptable.
+                                    Button("Play now") { model.playMusicNext(t.id) }
+                                    Button("Reveal in Music") { model.revealMusicNext(t.id) }
+                                }
+                        }
+                    }
+                    .padding(.bottom, 10)   // last row clears the fade below
+                }
+                .mask(VStack(spacing: 0) {
+                    Color.white
+                    LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom).frame(height: 14)
+                })
+            }
             .frame(maxHeight: .infinity, alignment: .top)
             .layoutPriority(1)
         }
@@ -893,15 +1475,25 @@ struct SlideOverButton: View {
     let help: String
 
     var body: some View {
-        if web.hasToken {
-            Button { model.toggleSlideOver(kind) } label: {
-                Image(systemName: symbol).font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(model.slideOver == kind ? Gruv.aqua : Gruv.fg4)
-                    .frame(width: 26, height: 22).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(help)
+        if web.hasToken { SlideOverToggle(model: model, kind: kind, symbol: symbol, help: help) }
+    }
+}
+
+/// The header-row slide-over button itself (Apple Music uses it directly: no token to wait for).
+struct SlideOverToggle: View {
+    @ObservedObject var model: NowPlayingModel
+    let kind: NowPlayingModel.SlideOver
+    let symbol: String
+    let help: String
+
+    var body: some View {
+        Button { model.toggleSlideOver(kind) } label: {
+            Image(systemName: symbol).font(.system(size: 14, weight: .medium))
+                .foregroundStyle(model.slideOver == kind ? Gruv.aqua : Gruv.fg4)
+                .frame(width: 26, height: 22).contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }
 
@@ -1060,7 +1652,7 @@ private struct DeviceRow: View {
 /// back chevron, title + accessory, spinner, the content, and web.caption errors at the bottom.
 private struct SlideOverPanel<Accessory: View, Content: View>: View {
     @ObservedObject var model: NowPlayingModel
-    @ObservedObject var web: SpotifyWeb
+    let caption: String   // web.caption (spotifyd) or model.musicCaption (Apple Music)
     let title: String
     let busy: Bool
     var onBack: (() -> Void)? = nil   // nil = close the slide-over (a pushed view goes back instead)
@@ -1083,8 +1675,8 @@ private struct SlideOverPanel<Accessory: View, Content: View>: View {
             }
             .padding(.top, 10)   // breathing room under the tab's title row
             content
-            if !web.caption.isEmpty {
-                Text(web.caption).font(.caption).foregroundStyle(Gruv.orange).lineLimit(2)
+            if !caption.isEmpty {
+                Text(caption).font(.caption).foregroundStyle(Gruv.orange).lineLimit(2)
             }
         }
         .padding(.horizontal, 18)
@@ -1142,7 +1734,7 @@ private struct PlaylistList: View {
     }
 
     var body: some View {
-        SlideOverPanel(model: model, web: web, title: "Playlists", busy: web.playlistsLoading || busy) {
+        SlideOverPanel(model: model, caption: web.caption, title: "Playlists", busy: web.playlistsLoading || busy) {
             if web.canReadPlaylists, !web.playlists.isEmpty {
                 Text("\(web.playlists.count)").font(.caption.monospacedDigit()).foregroundStyle(Gruv.gray)
             }
@@ -1226,7 +1818,7 @@ private struct PlaylistDetail: View {
     private var owned: Bool { !playlist.ownerID.isEmpty && playlist.ownerID == web.userID }
 
     var body: some View {
-        SlideOverPanel(model: model, web: web, title: playlist.name, busy: loading || busy, onBack: { model.showPlaylist(nil) }) {
+        SlideOverPanel(model: model, caption: web.caption, title: playlist.name, busy: loading || busy, onBack: { model.showPlaylist(nil) }) {
             if !loading { Text("\(tracks.count)").font(.caption.monospacedDigit()).foregroundStyle(Gruv.gray) }
         } content: {
             HStack(spacing: 8) {
@@ -1365,7 +1957,7 @@ struct SearchPanel: View {
     @State private var clearTask: DispatchWorkItem?
 
     var body: some View {
-        SlideOverPanel(model: model, web: web, title: "Search", busy: searching || busy) {
+        SlideOverPanel(model: model, caption: web.caption, title: "Search", busy: searching || busy) {
             EmptyView()
         } content: {
             FieldBox(symbol: "magnifyingglass") {
@@ -1500,6 +2092,12 @@ private struct QueueThumb: View {
     @MainActor private func load() async {
         if let hit = Self.cache[url] { image = hit; return }
         image = nil
+        if url.hasPrefix("applemusic:") {   // Next in playlist: art comes from Music by persistent ID, placeholder if none
+            guard let img = await NowPlayingModel.musicTrackArtwork(String(url.dropFirst(11))), !Task.isCancelled else { return }
+            Self.cache[url] = img
+            image = img
+            return
+        }
         guard let u = URL(string: url), !url.isEmpty,
               let (data, _) = try? await URLSession.shared.data(from: u),
               let img = NSImage(data: data) else { return }
@@ -1553,11 +2151,17 @@ struct SpotifydControls: View {
     }
 
     private var buttons: some View {
-        HStack(spacing: 30) {
+        HStack(spacing: 22) {
+            mode("shuffle", on: web.shuffleState == true) { model.toggleShuffle() }
             ctrl("backward.fill") { model.previous() }
             ctrl(model.isPlaying ? "pause.fill" : "play.fill", size: 30) { model.playPause() }
             ctrl("forward.fill") { model.next() }
+            mode(web.repeatState == "track" ? "repeat.1" : "repeat", on: (web.repeatState ?? "off") != "off") { web.cycleRepeat() }
         }
+    }
+
+    private func mode(_ symbol: String, on: Bool, _ action: @escaping () -> Void) -> some View {
+        TransportToggle(symbol: symbol, on: on, action: action)
     }
 
     private func caption(_ text: String, _ color: Color) -> some View {
@@ -1569,5 +2173,143 @@ struct SpotifydControls: View {
             Image(systemName: symbol).font(.system(size: size)).foregroundStyle(Gruv.fg1).frame(width: 44, height: 44)
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Shuffle / repeat toggle in the transport row: green when on, fg4 when off (spotifyd + Apple Music).
+struct TransportToggle: View {
+    let symbol: String
+    let on: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(on ? Gruv.green : Gruv.fg4).frame(width: 44, height: 44)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Apple Music transport: shuffle · previous · play/pause · next · repeat (off → all → one), and
+/// Music's own volume (0–100) once the first AppleScript read reported it.
+struct MusicAppControls: View {
+    @ObservedObject var model: NowPlayingModel
+    @State private var vol: Double = 0.5
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 22) {
+                TransportToggle(symbol: "shuffle", on: model.shuffleOn) { model.toggleMusicShuffle() }
+                ctrl("backward.fill") { model.previous() }
+                ctrl(model.isPlaying ? "pause.fill" : "play.fill", size: 30) { model.playPause() }
+                ctrl("forward.fill") { model.next() }
+                TransportToggle(symbol: model.repeatMode == "one" ? "repeat.1" : "repeat", on: model.repeatMode != "off") { model.cycleMusicRepeat() }
+            }
+            if model.volume != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "speaker.fill").font(.caption).foregroundStyle(Gruv.gray)
+                    Slider(value: $vol, in: 0...1) { editing in if !editing { model.setMusicVolume(vol) } }
+                        .tint(Gruv.green)
+                    Image(systemName: "speaker.wave.3.fill").font(.caption).foregroundStyle(Gruv.gray)
+                }
+                .padding(.horizontal, 24)
+            }
+        }
+        .padding(.top, 4)
+        .onAppear { if let v = model.volume { vol = v } }
+        .onChange(of: model.volume) { _, v in if let v { vol = v } }
+    }
+
+    private func ctrl(_ symbol: String, size: CGFloat = 20, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: size)).foregroundStyle(Gruv.fg1).frame(width: 44, height: 44)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Apple Music: user playlists (no Library, no folders) with a filter. Click = play it and close.
+struct MusicPlaylistsPanel: View {
+    @ObservedObject var model: NowPlayingModel
+    @State private var filter = ""
+
+    private var shown: [LibraryItem] {
+        let f = filter.trimmingCharacters(in: .whitespaces)
+        return f.isEmpty ? model.musicPlaylists : model.musicPlaylists.filter { $0.title.localizedCaseInsensitiveContains(f) }
+    }
+
+    var body: some View {
+        SlideOverPanel(model: model, caption: model.musicCaption, title: "Playlists", busy: model.musicBusy) {
+            if !model.musicPlaylists.isEmpty {
+                Text("\(model.musicPlaylists.count)").font(.caption.monospacedDigit()).foregroundStyle(Gruv.gray)
+            }
+        } content: {
+            FieldBox(symbol: "line.3.horizontal.decrease") {
+                LinkTextField(placeholder: "Filter playlists", onSubmit: { _ in false }, onChange: { filter = $0 })
+            }
+            ScrollView(showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    ForEach(shown) { p in
+                        MediaRow(title: p.title, detail: p.detail, imageURL: "", hoverSymbol: "play.fill") { model.playMusicPlaylist(p.id) }
+                    }
+                }
+                .padding(.bottom, 10)
+            }
+        }
+        .onAppear { model.loadMusicPlaylists() }
+    }
+}
+
+/// Apple Music: library song search (350 ms debounce, 2+ characters, first 25). Click = play the track.
+struct MusicSearchPanel: View {
+    @ObservedObject var model: NowPlayingModel
+    @State private var query = ""
+    @State private var results: [LibraryItem]?
+    @State private var pending: DispatchWorkItem?
+
+    var body: some View {
+        SlideOverPanel(model: model, caption: model.musicCaption, title: "Search", busy: model.musicBusy) {
+            EmptyView()
+        } content: {
+            FieldBox(symbol: "magnifyingglass") {
+                LinkTextField(placeholder: "Songs in your library", onSubmit: { text in run(text, delay: 0); return false },
+                              onChange: { text in run(text, delay: 0.35) }, autoFocus: true)
+            }
+            if let results {
+                if results.isEmpty {
+                    Text("No songs for \u{201C}\(query)\u{201D}").font(.caption).foregroundStyle(Gruv.gray)
+                        .frame(maxWidth: .infinity).padding(.top, 12)
+                } else {
+                    ScrollView(showsIndicators: false) {
+                        LazyVStack(alignment: .leading, spacing: 4) {
+                            ForEach(results) { t in
+                                MediaRow(title: t.title, detail: t.detail, imageURL: "", hoverSymbol: "play.fill") { model.playMusicTrack(t.id) }
+                            }
+                        }
+                        .padding(.bottom, 10)
+                    }
+                }
+            } else if query.trimmingCharacters(in: .whitespaces).count < 2 {
+                Text("Type at least two characters").font(.caption).foregroundStyle(Gruv.gray)
+                    .frame(maxWidth: .infinity).padding(.top, 12)
+            }
+        }
+        .onDisappear { pending?.cancel() }
+    }
+
+    private func run(_ text: String, delay: Double) {
+        query = text
+        pending?.cancel()
+        let q = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard q.count >= 2 else { results = nil; return }
+        let w = DispatchWorkItem {
+            model.searchMusic(q) { r in
+                guard q == query.trimmingCharacters(in: .whitespacesAndNewlines) else { return }   // field changed since
+                if let r { results = r }   // nil: the caption says why
+            }
+        }
+        pending = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: w)
     }
 }

@@ -10,5 +10,6 @@
   "musicSource": "spotify",
   "spotifyClientID": "",
   "spotifyDevice": "MacBook",
-  "spotifyAutoResume": true
+  "spotifyAutoResume": true,
+  "spotifydLaunchLabel": "fi.mangusti.spotifyd"
 }

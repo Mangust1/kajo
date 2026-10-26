@@ -47,7 +47,7 @@ final class VPNModel: ObservableObject {
     var anyActive: Bool { twingate.active || openvpnUp || nordvpn.active || tailscaleUp }
 
     init() {
-        let j = loadConfigJSON("vpn")
+        let j = loadConfigJSON("vpn.json")   // was "vpn" (no extension) since 0.28 — masked by the old default profile
         openvpnProfile = j["profile"] as? String ?? "work"   // placeholder; the real profile lives in the local vpn.json
         vpnBin = ((j["vpnBin"] as? String) ?? "~/bin/vpn").replacingOccurrences(of: "~", with: NSHomeDirectory())
     }

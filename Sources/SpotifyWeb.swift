@@ -25,6 +25,10 @@ final class SpotifyWeb: ObservableObject {
     private var playlistsAt: Date?
     @Published var devices: [Device] = []
     @Published var devicesLoading = false
+    /// Shuffle / repeat ("off" | "context" | "track") of the player, nil until first read. Fed by
+    /// GET /me/player (noteContext), spotifyd's shuffle_changed / repeat_changed events, and the toggles.
+    @Published var shuffleState: Bool?
+    @Published var repeatState: String?
 
     /// The stored token was granted the playlist scopes (tokens from before 0.39 carry no scope → false).
     var canReadPlaylists: Bool { token?.scope?.split(separator: " ").contains("playlist-read-private") ?? false }
@@ -35,6 +39,13 @@ final class SpotifyWeb: ObservableObject {
     }
     /// Current user's id from GET /me (owner check for "Remove from playlist"), cached for the session.
     @Published var userID: String?
+    /// Our device is missing (caption shown, or a player command answered 404): the watchdog checks it.
+    var onDeviceMissing: (() -> Void)?
+
+    private func deviceNotFound() {
+        caption = "device \"\(deviceName)\" not found (is spotifyd running?)"
+        onDeviceMissing?()
+    }
 
     private struct Token: Codable { var access_token: String; var refresh_token: String; var expires_at: Double; var scope: String? }
     private var token: Token?
@@ -206,6 +217,7 @@ final class SpotifyWeb: ObservableObject {
                         let j = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
                         let msg = (j?["error"] as? [String: Any])?["message"] as? String
                         self.caption = "Spotify: " + (msg ?? "HTTP \(code)")
+                        if code == 404, path.hasPrefix("/me/player") { self.onDeviceMissing?() }   // "no active device"
                     } else { self.caption = "" }
                     done(code, data)
                 }
@@ -219,7 +231,7 @@ final class SpotifyWeb: ObservableObject {
             guard let self, code == 200 else { return }
             let devices = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["devices"] as? [[String: Any]]) ?? []
             guard let dev = devices.first(where: { ($0["name"] as? String) == self.deviceName }), let id = dev["id"] as? String else {
-                self.caption = "device \"\(self.deviceName)\" not found (is spotifyd running?)"; return
+                self.deviceNotFound(); return
             }
             if dev["is_active"] as? Bool == true {
                 self.api("PUT", "/me/player/play?device_id=\(id)")
@@ -241,6 +253,8 @@ final class SpotifyWeb: ObservableObject {
         api("GET", "/me/player", quiet: true) { [weak self] code, data in
             guard let self, code == 200,
                   let j = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else { return }
+            if let v = j["shuffle_state"] as? Bool { self.shuffleState = v }   // modes are current even when the item lags
+            if let v = j["repeat_state"] as? String { self.repeatState = v }
             guard (j["item"] as? [String: Any])?["id"] as? String == trackID else {
                 if attempt < 3 { DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.noteContext(trackID: trackID, attempt: attempt + 1) } }
                 return
@@ -252,17 +266,59 @@ final class SpotifyWeb: ObservableObject {
         }
     }
 
-    /// After a resume: put shuffle/repeat back to what `ctx` saw, only where /me/player now differs.
+    /// After a resume: put shuffle/repeat back to what `ctx` saw.
     private func restoreModes(_ ctx: PlaybackContext?, deviceID id: String) {
         guard let ctx, ctx.shuffle != nil || ctx.repeatState != nil else { return }
-        api("GET", "/me/player", quiet: true) { [weak self] code, data in
-            guard let self, code == 200,
-                  let j = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else { return }
-            if let want = ctx.shuffle, j["shuffle_state"] as? Bool != want {
-                self.api("PUT", "/me/player/shuffle?state=\(want)&device_id=\(id)", quiet: true)
+        applyModes(shuffle: ctx.shuffle, repeatState: ctx.repeatState, deviceID: id)
+    }
+
+    /// Set shuffle/repeat once playback has started. spotifyd (librespot) resets shuffle when a new
+    /// context loads, so a mode PUT before or right after `play` is lost: wait 0.6 s, PUT, then read
+    /// /me/player 1.5 s later and PUT again (once) whatever still differs.
+    // ponytail: fixed delays, not an event wait; upgrade path = wait for the hook's `load`/`start`
+    // event before the first PUT if 0.6 s ever proves too short.
+    private func applyModes(shuffle: Bool?, repeatState: String?, deviceID id: String?, verify: Bool = true) {
+        let dev = id.map { "&device_id=\($0)" } ?? ""
+        DispatchQueue.main.asyncAfter(deadline: .now() + (verify ? 0.6 : 0)) { [weak self] in
+            guard let self else { return }
+            if let want = shuffle { self.api("PUT", "/me/player/shuffle?state=\(want)" + dev, quiet: true); self.shuffleState = want }
+            if let want = repeatState { self.api("PUT", "/me/player/repeat?state=\(want)" + dev, quiet: true); self.repeatState = want }
+            guard verify else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                self.api("GET", "/me/player", quiet: true) { code, data in
+                    guard code == 200,
+                          let j = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else { return }
+                    let s = shuffle.flatMap { j["shuffle_state"] as? Bool != $0 ? $0 : nil }
+                    let r = repeatState.flatMap { j["repeat_state"] as? String != $0 ? $0 : nil }
+                    if s != nil || r != nil { self.applyModes(shuffle: s, repeatState: r, deviceID: id, verify: false) }
+                }
             }
-            if let want = ctx.repeatState, j["repeat_state"] as? String != want {
-                self.api("PUT", "/me/player/repeat?state=\(want)&device_id=\(id)", quiet: true)
+        }
+    }
+
+    /// Transport-row toggles: optimistic, reverted when Spotify refuses (reason → caption).
+    func toggleShuffle(done: @escaping (Bool) -> Void = { _ in }) {
+        guard hasToken else { return }
+        let was = shuffleState, want = !(was ?? false)
+        shuffleState = want
+        withDeviceID { [weak self] id in
+            self?.api("PUT", "/me/player/shuffle?state=\(want)" + (id.map { "&device_id=\($0)" } ?? "")) { code, _ in
+                let ok = code > 0 && code < 300
+                if !ok, self?.shuffleState == want { self?.shuffleState = was }
+                done(ok)
+            }
+        }
+    }
+
+    /// Repeat cycles off → context → track → off.
+    func cycleRepeat() {
+        guard hasToken else { return }
+        let was = repeatState
+        let want = ["off": "context", "context": "track"][was ?? "off"] ?? "off"
+        repeatState = want
+        withDeviceID { [weak self] id in
+            self?.api("PUT", "/me/player/repeat?state=\(want)" + (id.map { "&device_id=\($0)" } ?? "")) { code, _ in
+                if !(code > 0 && code < 300), self?.repeatState == want { self?.repeatState = was }
             }
         }
     }
@@ -284,7 +340,7 @@ final class SpotifyWeb: ObservableObject {
         guard hasToken else { return }
         waitForDevice(named: deviceName, tries: 15) { [weak self] d in
             guard let self else { return }
-            guard let d, let id = d.deviceID else { self.caption = "device \"\(self.deviceName)\" not found (is spotifyd running?)"; return }
+            guard let d, let id = d.deviceID else { self.deviceNotFound(); return }
             let restoreVolume = {
                 guard let v = volumePercent, abs((d.volume ?? -100) - v) > 2 else { return }
                 self.setVolume(v, deviceID: id)   // by device id: another device may be the active one
@@ -325,15 +381,15 @@ final class SpotifyWeb: ObservableObject {
         guard hasToken else { return }
         waitForDevice(named: deviceName, tries: 15) { [weak self] d in
             guard let self, let d, let id = d.deviceID, abs((d.volume ?? -100) - percent) > 2 else { return }
-            self.setVolume(percent, deviceID: id)
+            self.setVolume(percent, deviceID: id, quiet: true)   // keeps a watchdog/resume caption
         }
     }
 
     func pause()    { api("PUT", "/me/player/pause") }
     func next()     { api("POST", "/me/player/next") }
     func previous() { api("POST", "/me/player/previous") }
-    func setVolume(_ percent: Int, deviceID: String? = nil) {
-        api("PUT", "/me/player/volume?volume_percent=\(max(0, min(100, percent)))" + (deviceID.map { "&device_id=\($0)" } ?? ""))
+    func setVolume(_ percent: Int, deviceID: String? = nil, quiet: Bool = false) {
+        api("PUT", "/me/player/volume?volume_percent=\(max(0, min(100, percent)))" + (deviceID.map { "&device_id=\($0)" } ?? ""), quiet: quiet)
     }
 
     /// Skip forward n tracks, one POST after another so Spotify sees them in order.
@@ -353,13 +409,14 @@ final class SpotifyWeb: ObservableObject {
         let link: String    // https://open.spotify.com/... (empty when Spotify sent neither)
     }
 
-    /// The whole play queue as Spotify returns it (tracks or episodes, up to ~20). Silent on failure.
-    func queue(done: @escaping ([QueueItem]) -> Void) {
+    /// The whole play queue as Spotify returns it (tracks or episodes, up to ~20). Silent on
+    /// failure: `nil` = the call failed (non-200, unparsable), `[]` = Spotify said 200 with no queue.
+    func queue(done: @escaping ([QueueItem]?) -> Void) {
         guard hasToken else { return }
         api("GET", "/me/player/queue", quiet: true) { code, data in
             guard code == 200,
-                  let r = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
-                  let items = r["queue"] as? [[String: Any]] else { return }
+                  let r = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else { done(nil); return }
+            guard let items = r["queue"] as? [[String: Any]] else { done([]); return }
             done(items.compactMap { j in
                 guard let name = j["name"] as? String, !name.isEmpty else { return nil }
                 let artists = ((j["artists"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
@@ -401,16 +458,15 @@ final class SpotifyWeb: ObservableObject {
         }
     }
 
-    /// Shuffle on, then play `uri` — both on the configured device (else the active one). Errors → caption.
+    /// Play `uri`, then shuffle on (see applyModes: spotifyd drops a shuffle set before the context
+    /// loads) — on the configured device (else the active one). Errors → caption.
     func shufflePlay(_ uri: String, done: @escaping (Bool) -> Void) {
         guard hasToken else { done(false); return }
         withDeviceID { [weak self] id in
-            let dev = id.map { "&device_id=\($0)" } ?? ""
-            self?.api("PUT", "/me/player/shuffle?state=true" + dev) { code, _ in
-                guard code > 0, code < 300 else { done(false); return }
-                self?.api("PUT", "/me/player/play" + (id.map { "?device_id=\($0)" } ?? ""), json: ["context_uri": uri]) { code, _ in
-                    done(code > 0 && code < 300)
-                }
+            self?.api("PUT", "/me/player/play" + (id.map { "?device_id=\($0)" } ?? ""), json: ["context_uri": uri]) { code, _ in
+                let ok = code > 0 && code < 300
+                if ok { self?.applyModes(shuffle: true, repeatState: nil, deviceID: id) }
+                done(ok)
             }
         }
     }
@@ -693,6 +749,16 @@ final class SpotifyWeb: ObservableObject {
                        volume: j["volume_percent"] as? Int)
             }
             done?(self.devices)
+        }
+    }
+
+    /// Watchdog probe: is `deviceName` in /me/player/devices? nil = the read failed (offline, no token).
+    func deviceListed(done: @escaping (Bool?) -> Void) {
+        guard hasToken else { done(nil); return }
+        api("GET", "/me/player/devices", quiet: true) { [weak self] code, data in
+            guard let self, code == 200 else { done(nil); return }
+            let list = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["devices"] as? [[String: Any]]) ?? []
+            done(list.contains { ($0["name"] as? String) == self.deviceName })
         }
     }
 

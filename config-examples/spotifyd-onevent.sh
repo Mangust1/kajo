@@ -5,7 +5,7 @@
 # in ~/Library/Application Support/spotifyd/spotifyd.conf (the macOS config path, not ~/.config).
 #
 # Every player event merges its env (PLAYER_EVENT, TRACK_ID, TRACK_NAME, TRACK_COVER,
-# TRACK_DURATION, POSITION_MS, VOLUME…) into one JSON file, newest value wins, plus
+# TRACK_DURATION, POSITION_MS, VOLUME, SHUFFLE, REPEAT…) into one JSON file, newest value wins, plus
 # "_playing" (changed only by play-state events) and "ts" (unix seconds).
 # Written to a temp file and mv'd into place: Kajo watches the directory, and a rename is
 # what makes the watcher fire (and nobody ever reads a half-written file).
@@ -14,7 +14,7 @@ out="$HOME/.config/kajo/spotifyd-state.json"
 p=sys.argv[1]
 try: d=json.load(open(p))
 except Exception: d={}
-d.update({k:v for k,v in os.environ.items() if k.startswith(("PLAYER_","TRACK_","PLAY_","POSITION","DURATION","VOLUME","SINK"))})
+d.update({k:v for k,v in os.environ.items() if k.startswith(("PLAYER_","TRACK_","PLAY_","POSITION","DURATION","VOLUME","SINK","SHUFFLE","REPEAT"))})
 ev=d.get("PLAYER_EVENT","")
 if ev in ("start","play"): d["_playing"]=True
 elif ev in ("pause","stop","sessiondisconnected","unavailable"): d["_playing"]=False

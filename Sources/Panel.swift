@@ -76,6 +76,10 @@ struct PanelView: View {
                     DevicesButton(model: nowPlaying, web: web)
                     SlideOverButton(model: nowPlaying, web: web, kind: .playlists, symbol: "music.note.list", help: "Playlists")
                 }
+                if state.tab == .music, nowPlaying.appleMusic {   // no device picker: see MusicTab's ponytail note
+                    SlideOverToggle(model: nowPlaying, kind: .search, symbol: "magnifyingglass", help: "Search library")
+                    SlideOverToggle(model: nowPlaying, kind: .playlists, symbol: "music.note.list", help: "Playlists")
+                }
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
@@ -112,6 +116,13 @@ struct PanelView: View {
                     switch nowPlaying.slideOver {
                     case .playlists: PlaylistsPanel(model: nowPlaying, web: web).transition(.move(edge: .trailing))
                     case .search:    SearchPanel(model: nowPlaying, web: web).transition(.move(edge: .trailing))
+                    case nil:        EmptyView()
+                    }
+                }
+                if state.tab == .music, nowPlaying.appleMusic {
+                    switch nowPlaying.slideOver {
+                    case .playlists: MusicPlaylistsPanel(model: nowPlaying).transition(.move(edge: .trailing))
+                    case .search:    MusicSearchPanel(model: nowPlaying).transition(.move(edge: .trailing))
                     case nil:        EmptyView()
                     }
                 }

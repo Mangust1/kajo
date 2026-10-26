@@ -19,8 +19,8 @@ struct Ccy { let code: String; let flag: String }
 
 // The single source of truth (API request, rate table, field rows, Tab/Shift-Tab
 // wrap all derive from it). Loaded from currency.json { "currencies": [{code,flag}…] };
-// falls back to sane defaults. Only constraint: codes must be in the ECB set
-// Frankfurter serves (USD, GBP, JPY, SGD, CNY, AUD, SEK, NOK, CHF, THB, MYR, …).
+// falls back to sane defaults. Codes must be ones open.er-api.com serves
+// (~160 ISO codes incl. VND, which the ECB/Frankfurter set lacks).
 // EUR is the base and is forced first regardless of config order.
 let currencies: [Ccy] = {
     let defaults = [Ccy(code: "EUR", flag: "🇪🇺"), Ccy(code: "GBP", flag: "🇬🇧"),
@@ -49,24 +49,27 @@ final class CurrencyModel: ObservableObject {
     private var lastFetch = Date.distantPast
 
     func refresh(force: Bool = false) {
-        // ECB rates change at most once a business day — cache 6h (force bypasses).
+        // Rates update once a day (free ExchangeRate-API tier, no key) — cache 6h (force bypasses).
         guard force || rates.count < 2 || Date().timeIntervalSince(lastFetch) > 21600 else { return }
-        let to = currencies.map(\.code).filter { $0 != "EUR" }.joined(separator: ",")
-        guard let url = URL(string: "https://api.frankfurter.app/latest?from=EUR&to=\(to)") else { return }
+        guard let url = URL(string: "https://open.er-api.com/v6/latest/EUR") else { return }
         lastFetch = Date()
         URLSession.shared.dataTask(with: url) { [weak self] data, resp, err in
             guard let data, (resp as? HTTPURLResponse)?.statusCode == 200,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let r = obj["rates"] as? [String: Double] else {
-                // One unsupported code in currency.json 404s the whole request — say so.
                 let code = (resp as? HTTPURLResponse)?.statusCode
-                let why = err?.localizedDescription ?? (code.map { "HTTP \($0) — check the codes in currency.json" } ?? "bad response")
+                let why = err?.localizedDescription ?? (code.map { "HTTP \($0)" } ?? "bad response")
                 DispatchQueue.main.async { self?.error = "Rates unavailable: \(why)" }
                 return
             }
             var table = r; table["EUR"] = 1
-            let date = obj["date"] as? String ?? ""
-            DispatchQueue.main.async { self?.rates = table; self?.asOf = date; self?.error = nil }
+            // "Mon, 26 Oct 2026 00:02:31 +0000" → "26 Oct 2026"
+            let date = ((obj["time_last_update_utc"] as? String) ?? "").split(separator: " ").dropFirst().prefix(3).joined(separator: " ")
+            let missing = currencies.map(\.code).filter { table[$0] == nil }
+            DispatchQueue.main.async {
+                self?.rates = table; self?.asOf = date
+                self?.error = missing.isEmpty ? nil : "No rate for \(missing.joined(separator: ", ")) — check currency.json"
+            }
         }.resume()
     }
 
@@ -170,7 +173,7 @@ struct CurrencyTab: View {
             Spacer()
 
             HStack {
-                Text(model.error ?? (model.asOf.isEmpty ? "" : "ECB rate · \(model.asOf)"))
+                Text(model.error ?? (model.asOf.isEmpty ? "" : "Rates by ExchangeRate-API · \(model.asOf)"))
                     .font(.system(size: 11))
                     .foregroundColor(model.error == nil ? Gruv.fg4 : Gruv.red)
                     .lineLimit(2)

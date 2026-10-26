@@ -15,7 +15,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.43.5</string>
+	<string>0.44.2</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -39,17 +39,17 @@
 		<true/>
 	</dict>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Kajo reads and controls Spotify playback to show Now Playing.</string>
+	<string>Kajo reads and controls Spotify or Music playback to show Now Playing.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Kajo lists and connects your paired Bluetooth audio devices.</string>
-	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Kajo shows your upcoming events in the Calendar tab.</string>
-	<key>NSCalendarsUsageDescription</key>
-	<string>Kajo shows your upcoming events in the Calendar tab.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_spotify-connect._tcp</string>
 	</array>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Kajo shows your upcoming events in the Calendar tab.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Kajo shows your upcoming events in the Calendar tab.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Kajo talks to your home server, Home Assistant, UniFi controller and Spotify Connect speakers on the local network.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>

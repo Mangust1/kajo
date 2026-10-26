@@ -34,17 +34,19 @@ enum FieldKind {
     case modules             // config.json enabledModules ↔ Tab.allCases
     case cities              // calendar.json cities array
     case currencies          // currency.json currencies array (code + flag)
+    case choice([(value: String, label: String)])   // one-of segmented row (e.g. musicSource)
 }
 
 struct Field: Identifiable {
     let key: String
     let label: String
     let kind: FieldKind
+    var onlyIf: (key: String, value: String)? = nil   // shown only while that key holds that value (missing = "")
     var id: String { key }
 }
 
 struct ConfigFile: Identifiable {
-    var id: String { name }
+    var id: String { title }   // several sections can edit one file (config.json: General, Now Playing, Network)
     let name: String
     let title: String
     let symbol: String
@@ -53,6 +55,7 @@ struct ConfigFile: Identifiable {
     let fields: [Field]
     let template: String
     var help: (label: String, url: String)? = nil   // optional "learn more" link under the blurb
+    var shared = false   // a section of a file other sections also edit: Load template merges instead of replacing
 }
 
 // Tabs that have no JSON config — listed in the sidebar (greyed) so they don't look
@@ -66,10 +69,8 @@ struct PlaceholderTab: Identifiable {
 
 let noConfigTabs: [PlaceholderTab] = [
     .init(title: "Timer", symbol: "timer", note: "Nothing to configure — the last-used duration persists automatically."),
-    .init(title: "Now Playing", symbol: "music.note", note: "Nothing to configure — controls Spotify via automation. Approve the Automation → Spotify permission on first use."),
     .init(title: "Sound", symbol: "speaker.wave.2.fill", note: "Nothing to configure — output picker + Bluetooth battery work out of the box. `blueutil` is optional (for BT connect/disconnect)."),
     .init(title: "Power", symbol: "bolt.fill", note: "Nothing to configure — reads battery/SMC data from IOKit."),
-    .init(title: "Network", symbol: "wifi", note: "No JSON config. The Wi-Fi priority toggle needs a sudoers rule (see the README's Installation notes)."),
     .init(title: "VPN", symbol: "lock.fill", note: "vpn.json: { \"profile\": \"work\" } picks the OpenVPN profile the toggle drives via the `vpn` CLI (root LaunchDaemon, no sudo at runtime). Twingate / NordVPN / Tailscale need nothing."),
     .init(title: "System", symbol: "slider.horizontal.3", note: "Nothing to configure — Keep Awake and Empty Trash need no settings."),
     .init(title: "Memes", symbol: "photo.stack", note: "Nothing to configure — add and tag images in the tab itself; they're stored under ~/.config/kajo/memes/."),
@@ -83,12 +84,6 @@ let configFiles: [ConfigFile] = [
             Field(key: "notchHover", label: "Expand from the notch on hover", kind: .toggle),
             Field(key: "islandEars", label: "Hours + now playing beside the notch", kind: .toggle),
             Field(key: "enabledModules", label: "Enabled tabs", kind: .modules),
-            Field(key: "berylSSID", label: "Travel router Wi-Fi (Network tab)", kind: .text("GL-MT3600BE")),
-            Field(key: "berylScript", label: "Travel router script", kind: .text("~/Oma/claude/travel/beryl-up.sh")),
-            Field(key: "musicSource", label: "Now Playing source (spotify | spotifyd)", kind: .text("spotify")),
-            Field(key: "spotifyClientID", label: "Spotify app client ID (spotifyd controls)", kind: .text("")),
-            Field(key: "spotifyDevice", label: "spotifyd device name", kind: .text("MacBook")),
-            Field(key: "spotifyAutoResume", label: "Resume spotifyd after a Spotify disconnect", kind: .toggle),
         ],
         template: """
         {
@@ -98,6 +93,32 @@ let configFiles: [ConfigFile] = [
           "islandEars": true
         }
         """),
+    ConfigFile(name: "config.json", title: "Now Playing", symbol: "music.note", secret: false,
+        blurb: "Where Now Playing gets its music. Spotify app and Apple Music are scripted (approve Automation → Spotify / Music on first use); spotifyd is a headless Connect player driven through the Spotify Web API (README: Spotify without the desktop app). Stored in config.json; relaunch Kajo to switch.",
+        fields: [
+            Field(key: "musicSource", label: "Music source", kind: .choice([("spotify", "Spotify app"), ("spotifyd", "spotifyd"), ("applemusic", "Apple Music")])),
+            Field(key: "spotifyClientID", label: "Spotify app client ID (Web API controls)", kind: .text(""), onlyIf: ("musicSource", "spotifyd")),
+            Field(key: "spotifyDevice", label: "spotifyd device name", kind: .text("MacBook"), onlyIf: ("musicSource", "spotifyd")),
+            Field(key: "spotifyAutoResume", label: "Resume spotifyd after a Spotify disconnect", kind: .toggle, onlyIf: ("musicSource", "spotifyd")),
+            Field(key: "spotifydLaunchLabel", label: "spotifyd LaunchAgent label (watchdog, empty = off)", kind: .text("fi.mangusti.spotifyd"), onlyIf: ("musicSource", "spotifyd")),
+        ],
+        template: """
+        {
+          "musicSource": "spotify"
+        }
+        """, shared: true),
+    ConfigFile(name: "config.json", title: "Network", symbol: "wifi", secret: false,
+        blurb: "Optional travel-router row in the Network tab: its Wi-Fi name (empty = hidden) and the join + captive-portal script its Connect button runs. Stored in config.json. The Wi-Fi priority toggle needs a sudoers rule (README: Installation notes).",
+        fields: [
+            Field(key: "berylSSID", label: "Travel router Wi-Fi", kind: .text("GL-MT3600BE")),
+            Field(key: "berylScript", label: "Travel router script", kind: .text("~/Oma/claude/travel/beryl-up.sh")),
+        ],
+        template: """
+        {
+          "berylSSID": "",
+          "berylScript": "~/Oma/claude/travel/beryl-up.sh"
+        }
+        """, shared: true),
     ConfigFile(name: "calendar.json", title: "Calendar", symbol: "calendar", secret: false,
         blurb: "World-clock cities (name / IANA tz / lat / lon) and your home timezone. Weather via Open-Meteo, no key.",
         fields: [
@@ -138,7 +159,7 @@ let configFiles: [ConfigFile] = [
         fields: [ Field(key: "omlxURL", label: "oMLX URL", kind: .text("http://127.0.0.1:8000")) ],
         template: #"{ "omlxURL": "http://127.0.0.1:8000" }"#),
     ConfigFile(name: "currency.json", title: "Currency", symbol: "dollarsign.arrow.circlepath", secret: false,
-        blurb: "Currencies in the converter (code + flag emoji). EUR is the base and is always shown first. Codes must be ones Frankfurter serves (ECB majors + THB, MYR, SGD…).",
+        blurb: "Currencies in the converter (code + flag emoji). EUR is the base and is always shown first. Any ISO code open.er-api.com serves (~160, incl. VND).",
         fields: [ Field(key: "currencies", label: "Currencies", kind: .currencies) ],
         template: """
         {
@@ -150,7 +171,7 @@ let configFiles: [ConfigFile] = [
           ]
         }
         """,
-        help: ("Supported currency codes ↗", "https://api.frankfurter.app/currencies")),
+        help: ("Supported currency codes ↗", "https://www.exchangerate-api.com/docs/supported-currencies")),
     ConfigFile(name: "unifi.json", title: "UniFi", symbol: "shield.lefthalf.filled", secret: true,
         blurb: "Local UniFi controller account. host = controller URL (self-signed OK). Saved chmod 600.",
         fields: [
@@ -251,7 +272,9 @@ final class ConfigModel: ObservableObject {
     }
 
     func loadTemplate() {
-        value = parseJSON(selected.template) ?? [:]
+        let t = parseJSON(selected.template) ?? [:]
+        // A shared section (one slice of config.json) only resets its own keys; Save must not drop the others.
+        value = selected.shared ? value.merging(t) { _, new in new } : t
         text = prettyJSON(value)
         status = "Template loaded — review, then Save."
         statusOK = true
@@ -523,14 +546,37 @@ struct ConfigForm: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
-            ForEach(model.selected.fields) { field in
+            ForEach(model.selected.fields.filter(shown)) { field in
                 fieldView(field)
             }
         }
     }
 
+    private func shown(_ f: Field) -> Bool {
+        guard let c = f.onlyIf else { return true }
+        return ((model.value[c.key] as? String) ?? "").lowercased() == c.value
+    }
+
     @ViewBuilder private func fieldView(_ f: Field) -> some View {
         switch f.kind {
+        case .choice(let options):
+            labeled(f.label) {
+                let current = ((model.value[f.key] as? String) ?? options.first?.value ?? "").lowercased()
+                HStack(spacing: 3) {
+                    ForEach(options, id: \.value) { o in
+                        let on = current == o.value
+                        Button { model.value[f.key] = o.value } label: {
+                            Text(o.label).font(.caption.weight(.medium))
+                                .padding(.vertical, 4).padding(.horizontal, 14)
+                                .background(RoundedRectangle(cornerRadius: 6).fill(on ? Gruv.aqua.opacity(0.9) : Color.clear))
+                                .foregroundStyle(on ? Gruv.bg0 : Gruv.fg2)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(3)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Gruv.bg0.opacity(0.6)))
+            }
         case .toggle:
             Toggle(isOn: model.boolBinding(f.key)) { Text(f.label).foregroundStyle(Gruv.fg1) }
                 .toggleStyle(.switch).tint(Gruv.green)
