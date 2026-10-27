@@ -125,7 +125,7 @@ final class NowPlayingModel: ObservableObject {
     \t\ttell application "Spotify"
     \t\t\tset ps to player state as string
     \t\t\tif ps is not "stopped" then
-    \t\t\t\tset out to ps & linefeed & (name of current track) & linefeed & (artist of current track) & linefeed & (album of current track) & linefeed & (artwork url of current track) & linefeed & ((duration of current track) as text) & linefeed & ((player position) as text)
+    \t\t\t\tset out to ps & linefeed & (name of current track) & linefeed & (artist of current track) & linefeed & (album of current track) & linefeed & (artwork url of current track) & linefeed & ((duration of current track) as text) & linefeed & ((player position) as text) & linefeed & (id of current track)
     \t\t\tend if
     \t\tend tell
     \tend if
@@ -365,6 +365,7 @@ final class NowPlayingModel: ObservableObject {
         let pos = Double(lines[6].replacingOccurrences(of: ",", with: ".")) ?? 0
         setPosition(pos, duration: durMs / 1000)
         if lines[4] != artURL { artURL = lines[4]; loadArtwork(lines[4]) }
+        appTrackURI = lines.count > 7 ? lines[7] : ""
     }
 
     /// Quit Spotify and launch it again. Spotify does not resume playback by itself afterwards.
@@ -500,6 +501,16 @@ final class NowPlayingModel: ObservableObject {
     private var stateSource: DispatchSourceFileSystemObject?
     private var statePending: DispatchWorkItem?
     private var trackID = ""
+    private var appTrackURI = ""   // Spotify app source: spotify:track:<id> (or spotify:episode:…)
+
+    /// open.spotify.com link of the current track; nil for Apple Music or local files.
+    var spotifyLink: String? {
+        if appleMusic { return nil }
+        if spotifyd { return trackID.isEmpty ? nil : "https://open.spotify.com/track/\(trackID)" }
+        let p = appTrackURI.split(separator: ":")   // spotify:track:<id>; spotify:local:… has no web link
+        guard p.count == 3, p[0] == "spotify", p[1] != "local" else { return nil }
+        return "https://open.spotify.com/\(p[1])/\(p[2])"
+    }
     private var infoFetchedFor = ""
     private static let positionEvents: Set<String> = ["start", "pause", "load", "seeked", "positioncorrection", "position_changed"]
 
@@ -1080,12 +1091,13 @@ struct MusicTab: View {
     var body: some View {
         if model.hasTrack {
             VStack(spacing: 14) {
-                artwork
+                artwork.contextMenu { copyTrackLinkItem }
                 VStack(spacing: 3) {
                     Text(model.title).font(.headline).foregroundStyle(Gruv.fg0).lineLimit(1)
                     Text(model.artist).font(.callout).foregroundStyle(Gruv.fg2).lineLimit(1)
                     Text(model.album).font(.caption).foregroundStyle(Gruv.gray).lineLimit(1)
                 }
+                .contextMenu { copyTrackLinkItem }
                 progressBar
                 timeRow
                 if let web = model.web {
@@ -1139,6 +1151,10 @@ struct MusicTab: View {
         }
         .buttonStyle(.plain)
         .padding(.top, 4)
+    }
+
+    @ViewBuilder private var copyTrackLinkItem: some View {
+        if let link = model.spotifyLink { Button("Copy Spotify link") { copyLink(link) } }
     }
 
     private var artwork: some View {
