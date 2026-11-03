@@ -69,7 +69,9 @@ final class SpotifydWatchdog {
         }
     }
 
-    private func kick() {
+    /// Also called by NowPlayingModel when a session drop never reconnects (same rate limit).
+    func kick(caption: String = "Restarted spotifyd (it lost its connection)") {
+        checking = true
         let now = Date()
         kicks = kicks.filter { now.timeIntervalSince($0) < 3600 }
         guard let web, kicks.count < 5, kicks.last.map({ now.timeIntervalSince($0) >= 120 }) ?? true else { checking = false; return }
@@ -84,7 +86,7 @@ final class SpotifydWatchdog {
                 guard status == 0 else {
                     web.caption = "spotifyd restart failed (launchctl exit \(status))"; self.checking = false; return
                 }
-                web.caption = "Restarted spotifyd (it lost its connection)"
+                web.caption = caption
                 web.waitForDevice(named: web.deviceName, tries: 15) { d in
                     self.checking = false
                     guard d != nil else { return }

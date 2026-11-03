@@ -334,9 +334,10 @@ final class SpotifyWeb: ObservableObject {
     /// spotifyd's fresh player starts at its config initial_volume, so once the device is back
     /// `volumePercent` (the remembered `spotify.lastVolume`, else the volume before the drop) is restored on it when it differs by > 2 —
     /// after a successful resume, or right away when something already plays (user pressed play).
+    /// `alreadyPlaying` runs when that check finds playback (the caller stops retrying).
     // ponytail: "nothing plays" is judged from one GET /me/player; a client that starts playing a
-    // second later gets overridden by the transfer. Acceptable for a one-shot within 60 s of the drop.
-    func resumeAfterDrop(trackID: String, positionMs: Int, volumePercent: Int?) {
+    // second later gets overridden by the transfer. Acceptable for retries within 10 min of the drop.
+    func resumeAfterDrop(trackID: String, positionMs: Int, volumePercent: Int?, alreadyPlaying: @escaping () -> Void = {}) {
         guard hasToken else { return }
         waitForDevice(named: deviceName, tries: 15) { [weak self] d in
             guard let self else { return }
@@ -348,7 +349,7 @@ final class SpotifyWeb: ObservableObject {
             self.api("GET", "/me/player", quiet: true) { code, data in
                 guard code == 200 || code == 204 else { return }   // 204 = no active device
                 let j = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-                if j?["is_playing"] as? Bool == true { restoreVolume(); return }   // playing here or elsewhere: leave playback
+                if j?["is_playing"] as? Bool == true { restoreVolume(); alreadyPlaying(); return }   // playing here or elsewhere: leave playback
                 let loaded = (j?["item"] as? [String: Any])?["id"] as? String
                 let progress = j?["progress_ms"] as? Int ?? 0
                 let ctx = self.lastContext?.trackID == trackID ? self.lastContext : nil

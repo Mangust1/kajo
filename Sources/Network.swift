@@ -126,6 +126,48 @@ final class NetworkModel: ObservableObject {
         berylProc = p
     }
 
+    struct BerylVPNFail: Error { let msg: String }
+
+    // Route this Mac through the Beryl's VPN: `beryl_vpn.py status|on|off` next to berylScript,
+    // one JSON line {"vpn","mac","peer","tunnel"} on stdout, exit 1 + stderr on error.
+    // nil = unknown / not on the Beryl. The error caption lasts until the next refresh.
+    @Published var berylVPN: Bool?
+    @Published var berylVPNPeer = ""
+    @Published var berylVPNBusy = false
+    @Published var berylVPNError = ""
+    private var berylVPNCLI: String {
+        (berylScript as NSString).deletingLastPathComponent + "/beryl_vpn.py"
+    }
+
+    /// Runs the CLI off-main; returns (vpn, peer) or the stderr first line.
+    private func berylVPNCall(_ cmd: String) -> Result<(Bool, String), BerylVPNFail> {
+        let r = shellStatus("/usr/bin/python3", [berylVPNCLI, cmd])
+        guard r.status == 0, let line = r.out.split(separator: "\n").last,
+              let j = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              let vpn = j["vpn"] as? Bool else {
+            let msg = r.err.split(separator: "\n").first.map(String.init) ?? "exit \(r.status)"
+            return .failure(BerylVPNFail(msg: msg))
+        }
+        return .success((vpn, j["peer"] as? String ?? ""))
+    }
+
+    private func publishBerylVPN(_ r: Result<(Bool, String), BerylVPNFail>) {
+        switch r {
+        case .success(let (vpn, peer)): berylVPN = vpn; berylVPNPeer = peer; berylVPNError = ""
+        case .failure(let e): berylVPNError = "vpn: " + e.msg
+        }
+    }
+
+    func setBerylVPN(_ on: Bool) {
+        guard !berylVPNBusy else { return }
+        berylVPNBusy = true; berylVPNError = ""
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let r = self.berylVPNCall(on ? "on" : "off")
+            DispatchQueue.main.async { self.berylVPNBusy = false; self.publishBerylVPN(r) }
+        }
+    }
+
     private let dev = "en0"           // Wi-Fi interface on this Mac
     private let wifiService = "Wi-Fi" // service name in the order list
     private var order: [String] = []
@@ -197,7 +239,13 @@ final class NetworkModel: ObservableObject {
             let ord = Self.parseOrder(orderOut)
             let active = self.primaryService(orderOut)
             let lan = self.wiredIP(orderOut)
+            // ~1 s router RPC, only while on the Beryl; skipped while an on/off is in flight.
+            let onBeryl = on && !berylSSID.isEmpty && ssid == berylSSID
+            let vpn = onBeryl && !self.berylVPNBusy ? self.berylVPNCall("status") : nil
             DispatchQueue.main.async {
+                if !onBeryl { self.berylVPN = nil; self.berylVPNPeer = "" }
+                if !self.berylVPNBusy { self.berylVPNError = "" }
+                if let vpn { self.publishBerylVPN(vpn) }
                 self.wifiOn = on
                 self.ssid = on ? (ssid.isEmpty ? "Not connected" : ssid) : "Off"
                 self.ip = ip.isEmpty ? "—" : ip
@@ -454,6 +502,12 @@ struct NetworkTab: View {
         let caption = model.berylRunning ? (model.berylLine.isEmpty ? "starting…" : model.berylLine)
             : model.berylOK == true ? "online" : failed ? "failed"
             : connected ? "connected" : inRange ? "in range" : "not in range"
+        let vpnOn = connected && model.berylVPN == true
+        let vpnErr = !model.berylVPNError.isEmpty
+        let line = vpnErr ? model.berylVPNError
+            : vpnOn && !model.berylVPNPeer.isEmpty ? caption + " · " + model.berylVPNPeer : caption
+        let vpnEnabled = connected && model.berylVPN != nil && !model.berylVPNBusy
+        let vpnBinding = Binding<Bool>(get: { vpnOn }, set: { model.setBerylVPN($0) })
         return HStack(spacing: 11) {
             Image(systemName: "antenna.radiowaves.left.and.right")
                 .font(.system(size: 16))
@@ -461,9 +515,14 @@ struct NetworkTab: View {
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Beryl").foregroundStyle(Gruv.fg1)
-                Text(caption).font(.caption).foregroundStyle(failed ? Gruv.red : Gruv.gray).lineLimit(1)
+                Text(line).font(.caption).foregroundStyle(failed || vpnErr ? Gruv.red : Gruv.gray).lineLimit(1)
             }
             Spacer()
+            Toggle(isOn: vpnBinding) {
+                Text("VPN").font(.callout).foregroundStyle(vpnEnabled ? Gruv.fg1 : Gruv.fg4)
+            }
+            .toggleStyle(.switch).controlSize(.mini).tint(Gruv.green)
+            .disabled(!vpnEnabled)
             Button { model.runBeryl() } label: {
                 HStack(spacing: 5) {
                     if model.berylRunning { ProgressView().controlSize(.small) }

@@ -158,6 +158,22 @@ func shell(_ path: String, _ args: [String]) -> String? {
     return String(data: data, encoding: .utf8)
 }
 
+/// Like `shell`, but also returns the exit status and stderr (for CLIs that report errors there).
+func shellStatus(_ path: String, _ args: [String]) -> (status: Int32, out: String, err: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: path)
+    p.arguments = args
+    let out = Pipe(), err = Pipe(); p.standardOutput = out; p.standardError = err
+    do { try p.run() } catch { return (-1, "", "\(path) failed to launch") }
+    // stderr is drained on a second thread so neither pipe can fill up and block the child
+    var errData = Data()
+    let g = DispatchGroup(); g.enter()
+    DispatchQueue.global().async { errData = err.fileHandleForReading.readDataToEndOfFile(); g.leave() }
+    let outData = out.fileHandleForReading.readDataToEndOfFile()
+    g.wait(); p.waitUntilExit()
+    return (p.terminationStatus, String(decoding: outData, as: UTF8.self), String(decoding: errData, as: UTF8.self))
+}
+
 /// `~/.config/kajo/<name>` parsed as a JSON object; [:] when missing or invalid.
 func loadConfigJSON(_ name: String) -> [String: Any] {
     guard let d = try? Data(contentsOf: URL(fileURLWithPath: kajoConfigDir + "/" + name)),

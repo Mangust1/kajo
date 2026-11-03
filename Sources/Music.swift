@@ -270,7 +270,7 @@ final class NowPlayingModel: ObservableObject {
 
     /// Device picker row click: transfer playback there, then re-read the queue (Spotify lags ~1 s).
     func transferPlayback(to d: SpotifyWeb.Device) {
-        resumeArmed = nil
+        resumeArmed = nil; spotifydWantsPlay = false   // spotifyd's stop after a transfer away is not a failure
         web?.transfer(to: d) { [weak self] ok in
             guard ok else { return }
             self?.refreshQueue(after: 1)
@@ -448,6 +448,7 @@ final class NowPlayingModel: ObservableObject {
         if let web {
             let wantPlay = !isPlaying
             lastAction = (wantPlay, Date())
+            if !wantPlay { spotifydWantsPlay = false }   // our own pause is not a failed playback
             wantPlay ? web.play() : web.pause()
         } else { control("playpause", launch: appleMusic) }   // Apple Music: the play button may launch Music
     }
@@ -465,6 +466,7 @@ final class NowPlayingModel: ObservableObject {
             guard let self, let a = self.lastAction, self.tabOpen, self.lastMissAt >= a.at,
                   Date().timeIntervalSince(a.at) < 120, let web = self.web else { return }
             self.lastAction = nil
+            if !a.play { self.spotifydWantsPlay = false }
             a.play ? web.play() : web.pause()
         }
         web.onDeviceMissing = { [weak self, weak w] in
@@ -597,29 +599,60 @@ final class NowPlayingModel: ObservableObject {
         }
     }
 
-    // MARK: auto-resume after a session drop
+    // MARK: auto-resume after a session drop or a failed load
     // spotifyd issue #1306: Spotify resets the session mid-song (sessiondisconnected), spotifyd
-    // reconnects by itself (sessionconnected), but playback stays stopped. Arm on the disconnect
-    // while playing, fire once on the reconnect (or 5 s after the drop if it never comes).
-    // ponytail: one attempt per drop and a 60 s window; a drop that takes longer to heal is left
-    // alone (the user may have moved on). Upgrade path: retry with backoff if one try proves too few.
+    // reconnects by itself (sessionconnected), but playback stays stopped. And on flaky Wi-Fi
+    // (hotel, 2026-11-02 08:12–08:17 in ~/Library/Logs/spotifyd-events.log) a `load` dies into
+    // `stop`/`unavailable` a few times, then the session drops for 2 min, then a `start` dies again.
+    // `spotifydWantsPlay` = spotifyd was asked to play (set on load/start, cleared on pause,
+    // endoftrack and Kajo's own pause/transfer). Arm when that flag (or isPlaying) is set and a
+    // stop/unavailable/sessiondisconnected arrives; endoftrack → stop of a lone track doesn't arm.
+    // Armed: resumeAfterDrop 10 s, 20 s, 40 s after arming, then every 60 s; never while the session
+    // is down — sessionconnected fires right away and the backoff continues. A `start` disarms
+    // (success), so does finding something already playing (here or on another device). 10 min
+    // after the first arm it gives up and only restores the volume.
+    // ponytail: a start that dies within 30 s re-arms with the original arm time, so a
+    // start→stop loop still ends at 10 min. A retry may overlap one still waiting for the device
+    // (up to 15 s); the second sees is_playing and only fixes the volume.
+    // Stuck drop (2026-11-02 08:41, librespot 0.8): spotifyd logged the disconnect but its Spirc
+    // never ended, so it never reconnected (13 min until a manual kickstart). sessiondisconnected
+    // with no sessionconnected for 3 min kicks spotifyd once via the watchdog ("spotifyd stuck,
+    // restarted"); the armed resume survives the kick and fires on the next sessionconnected.
+    // ponytail: one kick per drop; if the kicked spotifyd stays down too, it is left alone.
+    // Upgrade path: a second kick with backoff plus a persistent warning in the tab.
     private var resumeArmed: (trackID: String, positionMs: Int, volumePercent: Int?, at: Date)?
-    private var resumeFallback: DispatchWorkItem?
+    private var resumeTimer: DispatchWorkItem?
+    private var resumeTries = 0
+    private var resumeStreak: (armedAt: Date, startAt: Date)?   // last arm a `start` disarmed
+    private var spotifydWantsPlay = false
+    private var sessionDown = false
+    private var stuckTimer: DispatchWorkItem?
+    private static let resumeWindow: TimeInterval = 600
 
     private func noteSessionEvent(_ event: String, at: Date, volumeBefore: Double?) {
         switch event {
+        case "load":
+            spotifydWantsPlay = true
+        case "pause", "endoftrack":
+            spotifydWantsPlay = false
+        case "stop", "unavailable":
+            if spotifydWantsPlay || isPlaying { armResume(volumeBefore: volumeBefore) }
         case "sessiondisconnected":
+            if !sessionDown, spotifyAutoResume, let watchdog {   // re-reads of the same file don't re-arm
+                stuckTimer?.cancel()
+                let w = DispatchWorkItem { [weak self] in
+                    guard let self, self.sessionDown else { return }
+                    watchdog.kick(caption: "spotifyd stuck, restarted")
+                }
+                stuckTimer = w
+                DispatchQueue.main.asyncAfter(deadline: .now() + 180, execute: w)
+            }
+            sessionDown = true
             // Re-reads of the same file see isPlaying already false, so this arms once per drop.
-            // A repeat disconnect while armed keeps the first timestamp: the 60 s window counts
-            // from the original drop, not the latest one.
-            guard spotifyAutoResume, resumeArmed == nil, isPlaying, let web, web.hasToken, !trackID.isEmpty else { return }
-            tick()   // the event carries POSITION_MS=0: take the extrapolated position instead
-            resumeArmed = (trackID, Int(positionSec * 1000), Self.lastVolume ?? volumeBefore.map { Int(($0 * 100).rounded()) }, Date())
-            resumeFallback?.cancel()
-            let w = DispatchWorkItem { [weak self] in self?.fireResume() }
-            resumeFallback = w
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: w)
+            if spotifydWantsPlay || isPlaying { armResume(volumeBefore: volumeBefore) }
         case "sessionconnected":
+            sessionDown = false
+            stuckTimer?.cancel(); stuckTimer = nil
             connectedAt = Date()
             if resumeArmed != nil { fireResume() }   // the resume restores lastVolume itself
             else if let v = Self.lastVolume, let web, web.hasToken { web.restoreVolume(v) }
@@ -630,9 +663,35 @@ final class NowPlayingModel: ObservableObject {
                 }
             }
         case "start":
-            resumeArmed = nil   // playing again by other means (spotifyd itself, another client)
+            spotifydWantsPlay = true
+            if let r = resumeArmed { resumeStreak = (r.at, Date()) }
+            disarmResume()   // playing again (our resume, spotifyd itself, another client)
         default: break
         }
+    }
+
+    /// No-op when already armed: a repeat stop/disconnect keeps the first arm time and backoff.
+    private func armResume(volumeBefore: Double?) {
+        guard spotifyAutoResume, resumeArmed == nil, let web, web.hasToken, !trackID.isEmpty else { return }
+        tick()   // stop/disconnect carry POSITION_MS=0 or none: take the extrapolated position instead
+        let at = resumeStreak.flatMap { Date().timeIntervalSince($0.startAt) < 30 ? $0.armedAt : nil } ?? Date()
+        resumeArmed = (trackID, Int(positionSec * 1000), Self.lastVolume ?? volumeBefore.map { Int(($0 * 100).rounded()) }, at)
+        resumeTries = 0
+        if !sessionDown { scheduleResume() }   // while down, sessionconnected fires it
+    }
+
+    private func disarmResume() {
+        resumeArmed = nil
+        resumeTimer?.cancel(); resumeTimer = nil
+    }
+
+    private func scheduleResume() {
+        resumeTimer?.cancel()
+        let delays: [TimeInterval] = [10, 20, 40]
+        let w = DispatchWorkItem { [weak self] in self?.fireResume() }
+        resumeTimer = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + (resumeTries < delays.count ? delays[resumeTries] : 60), execute: w)
+        resumeTries += 1
     }
 
     // MARK: remembered volume
@@ -653,12 +712,17 @@ final class NowPlayingModel: ObservableObject {
     }
 
     private func fireResume() {
-        resumeFallback?.cancel(); resumeFallback = nil
-        guard let r = resumeArmed else { return }
-        resumeArmed = nil   // one attempt per arm
-        guard let web else { return }
-        guard Date().timeIntervalSince(r.at) < 60 else { if let v = r.volumePercent { web.restoreVolume(v) }; return }   // too late to resume, still fix the volume
-        web.resumeAfterDrop(trackID: r.trackID, positionMs: r.positionMs, volumePercent: r.volumePercent)
+        resumeTimer?.cancel(); resumeTimer = nil
+        guard let r = resumeArmed, !sessionDown, let web else { return }   // down: sessionconnected fires again
+        guard Date().timeIntervalSince(r.at) < Self.resumeWindow else {   // too late to resume, still fix the volume
+            disarmResume()
+            if let v = r.volumePercent { web.restoreVolume(v) }
+            return
+        }
+        web.resumeAfterDrop(trackID: r.trackID, positionMs: r.positionMs, volumePercent: r.volumePercent) { [weak self] in
+            self?.disarmResume()   // something already plays (here or elsewhere): leave it alone
+        }
+        scheduleResume()   // disarmed by the next `start` when this one works
     }
 
     /// Writes ARTIST + ARTIST_TRACK_ID into the spotifyd state file so SketchyBar's music item

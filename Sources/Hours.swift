@@ -59,6 +59,7 @@ let hoursTZ: TimeZone = (loadConfigJSON("severa.json")["timeZone"] as? String).f
 let hoursCal: Calendar = { var c = Calendar.current; c.timeZone = hoursTZ; return c }()
 
 private let hoursDayFmt: DateFormatter    = { let f = DateFormatter(); f.dateFormat = "d.M."; f.timeZone = hoursTZ; return f }()
+private let hoursDayYFmt: DateFormatter   = { let f = DateFormatter(); f.dateFormat = "d.M.yy"; f.timeZone = hoursTZ; return f }()   // all-time rows span years
 private let hoursDayHdrFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "EEE d.M."; f.locale = Locale(identifier: "en_US"); f.timeZone = hoursTZ; return f }()
 private let hoursMonthFmt: DateFormatter  = { let f = DateFormatter(); f.dateFormat = "LLLL yyyy"; f.locale = Locale(identifier: "en_US"); f.timeZone = hoursTZ; return f }()
 private let hoursTimeFmt: DateFormatter   = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f }()
@@ -98,6 +99,12 @@ final class HoursModel: ObservableObject {
     @Published private var uploads: [String: UploadRecord] = [:]   // bucketKey -> what's on Severa
     @Published var warning: String?                          // e.g. the log file was unreadable
     @Published var focusDraft = 0                            // bumped when the tab becomes visible with no timer running
+    // Hours WINDOW view state (the panel tab, ear, Severa sync stay month-based + unfiltered).
+    // ponytail: not persisted — keep in UserDefaults if he asks.
+    enum Sort: String, CaseIterable { case newest = "Newest", oldest = "Oldest", longest = "Longest", taskAZ = "Task A–Z" }
+    @Published var projectFilter: String?                    // nil = all, "" = no project
+    @Published var allMonths = false
+    @Published var sort = Sort.newest
 
     private let url = URL(fileURLWithPath: kajoConfigDir + "/hours.json")
     // Upload records live NEXT TO the log (not UserDefaults): a restore/reinstall that
@@ -205,13 +212,15 @@ final class HoursModel: ObservableObject {
     var todayTotal: TimeInterval { daySeconds(Date()) }      // the island's left ear
     // completed entries in the viewed month, grouped by day (newest day first), then by task
     // within each day (same task done several times collapses to one group). Running one lives in the card.
-    func days() -> [(day: Date, groups: [TaskGroup])] {
-        let logged = entries.filter { $0.end != nil && inMonth($0) }
+    // windowed: apply the Hours window's project filter, scope and sort (Newest/Oldest; the flat sorts use flatGroups()).
+    func days(windowed: Bool = false) -> [(day: Date, groups: [TaskGroup])] {
+        let logged = (windowed ? windowEntries() : entries.filter(inMonth)).filter { $0.end != nil }
         let byDay = Dictionary(grouping: logged) { hoursCal.startOfDay(for: $0.start) }
-        return byDay.keys.sorted(by: >).map { day in
-            var order: [String] = []                 // preserve most-recent-session-first order
+        let newest = !(windowed && sort == .oldest)
+        return byDay.keys.sorted(by: newest ? (>) : (<)).map { day in
+            var order: [String] = []                 // preserve most-recent-session-first order (oldest-first for .oldest)
             var map: [String: [TimeEntry]] = [:]
-            for e in byDay[day]!.sorted(by: { $0.start > $1.start }) {
+            for e in byDay[day]!.sorted(by: { newest ? $0.start > $1.start : $0.start < $1.start }) {
                 if map[e.task] == nil { order.append(e.task) }
                 map[e.task, default: []].append(e)
             }
@@ -219,9 +228,31 @@ final class HoursModel: ObservableObject {
         }
     }
 
+    // window rows: scope (viewed month or all) + project filter; includes the running entry like monthSeconds()
+    func windowEntries() -> [TimeEntry] {
+        entries.filter { e in
+            (allMonths || inMonth(e)) && (projectFilter == nil || (e.projectName ?? "") == projectFilter)
+        }
+    }
+    func windowSeconds() -> TimeInterval { windowEntries().reduce(0) { $0 + $1.seconds } }
+    // distinct non-empty project names across ALL entries, A–Z
+    var projectNames: [String] {
+        Set(entries.compactMap { $0.projectName }.filter { !$0.isEmpty })
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+    // flat day×task groups for the Longest / Task A–Z sorts
+    func flatGroups() -> [TaskGroup] {
+        let all = days(windowed: true).flatMap { $0.groups }
+        if sort == .longest { return all.sorted { $0.seconds > $1.seconds } }
+        return all.sorted {
+            let c = $0.task.localizedCaseInsensitiveCompare($1.task)
+            return c == .orderedSame ? $0.day > $1.day : c == .orderedAscending
+        }
+    }
+
     // MARK: export (one line per task per day, chronological — for Severa)
-    func exportMonth() -> String {
-        let rows = entries.filter { $0.end != nil && inMonth($0) }
+    func exportMonth(windowed: Bool = false) -> String {
+        let rows = (windowed ? windowEntries() : entries.filter(inMonth)).filter { $0.end != nil }
         struct Key: Hashable { let day: Date; let task: String }
         var sum: [Key: TimeInterval] = [:], first: [Key: Date] = [:]
         for e in rows {
@@ -229,16 +260,19 @@ final class HoursModel: ObservableObject {
             sum[k, default: 0] += e.seconds
             first[k] = min(first[k] ?? e.start, e.start)
         }
-        var out = hoursMonthFmt.string(from: month) + "\n\n"
+        let all = windowed && allMonths
+        var out = all ? "All time" : hoursMonthFmt.string(from: month)
+        if windowed, let p = projectFilter { out += " — " + (p.isEmpty ? "No project" : p) }
+        out += "\n\n"
         for k in sum.keys.sorted(by: { (first[$0] ?? .distantPast) < (first[$1] ?? .distantPast) }) {
-            out += "\(hoursDayFmt.string(from: k.day))  \(k.task.isEmpty ? "—" : k.task) — \(decimalHours(sum[k]!)) h\n"
+            out += "\((all ? hoursDayYFmt : hoursDayFmt).string(from: k.day))  \(k.task.isEmpty ? "—" : k.task) — \(decimalHours(sum[k]!)) h\n"
         }
         out += "\nTotal: \(decimalHours(sum.values.reduce(0, +))) h\n"
         return out
     }
-    func copyMonth() {
+    func copyMonth(windowed: Bool = false) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(exportMonth(), forType: .string)
+        NSPasteboard.general.setString(exportMonth(windowed: windowed), forType: .string)
     }
 
     // MARK: Severa upload — aggregate the viewed month into day×phase×workType posts
@@ -723,44 +757,49 @@ struct HoursWindow: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Button { model.shiftMonth(-1) } label: { Image(systemName: "chevron.left") }.buttonStyle(.plain).foregroundColor(Gruv.fg4)
-                Text(hoursMonthFmt.string(from: model.month)).font(.system(size: 15, weight: .bold)).foregroundColor(Gruv.fg0)
+                    .disabled(model.allMonths)
+                Text(model.allMonths ? "All time" : hoursMonthFmt.string(from: model.month)).font(.system(size: 15, weight: .bold)).foregroundColor(Gruv.fg0).frame(width: 150, alignment: .leading)   // fixed width: the arrows stay put across month names
                 Button { model.shiftMonth(1) } label: { Image(systemName: "chevron.right") }.buttonStyle(.plain).foregroundColor(Gruv.fg4)
+                    .disabled(model.allMonths)
+                Picker("", selection: $model.allMonths) {
+                    Text("Month").tag(false)
+                    Text("All").tag(true)
+                }.pickerStyle(.segmented).labelsHidden().fixedSize().controlSize(.small)
                 Spacer()
-                Text("Total \(durText(model.monthSeconds()))").font(.system(size: 13, weight: .semibold)).foregroundColor(Gruv.yellow)
-                Button { model.copyMonth() } label: { Label("Copy", systemImage: "doc.on.doc").font(.system(size: 12)) }
-                    .buttonStyle(.plain).foregroundColor(Gruv.fg2).help("Copy month for Severa")
+                Text("Total \(durText(model.windowSeconds()))").font(.system(size: 13, weight: .semibold)).foregroundColor(Gruv.yellow)
+                Button { model.copyMonth(windowed: true) } label: { Label("Copy", systemImage: "doc.on.doc").font(.system(size: 12)) }
+                    .buttonStyle(.plain).foregroundColor(Gruv.fg2).help("Copy what is shown for Severa")
             }
+            HStack(spacing: 8) {
+                Picker("", selection: $model.projectFilter) {
+                    Text("All projects").tag(String?.none)
+                    Text("No project").tag(String?.some(""))
+                    ForEach(model.projectNames, id: \.self) { Text($0).tag(String?.some($0)) }
+                }.pickerStyle(.menu).labelsHidden().frame(maxWidth: 260).help("Show one project's entries")
+                Spacer()
+                Picker("", selection: $model.sort) {
+                    ForEach(HoursModel.Sort.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.menu).labelsHidden().fixedSize().help("Sort")
+            }
+            .font(.system(size: 12)).tint(Gruv.fg2)
             Divider().overlay(Gruv.bg3)
             ScrollView {
                 VStack(alignment: .leading, spacing: 5) {
-                    let days = model.days()
-                    if days.isEmpty {
-                        Text("No entries this month").foregroundColor(Gruv.fg4).padding(.top, 30)
-                    }
-                    ForEach(days, id: \.day) { grp in
-                        HStack {
-                            Text(hoursDayHdrFmt.string(from: grp.day)).font(.system(size: 12, weight: .semibold)).foregroundColor(Gruv.fg4)
-                            Spacer()
-                            Text(durText(model.daySeconds(grp.day))).font(.system(size: 12)).foregroundColor(Gruv.fg4)
-                        }.padding(.top, 8)
-                        ForEach(grp.groups) { g in
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Button {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(g.task, forType: .string)
-                                    copiedKey = g.id
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if copiedKey == g.id { copiedKey = nil } }
-                                } label: {
-                                    Image(systemName: copiedKey == g.id ? "checkmark" : "doc.on.doc")
-                                        .foregroundColor(copiedKey == g.id ? Gruv.green : Gruv.fg4)
-                                        .font(.system(size: 11))
-                                }.buttonStyle(.plain).help("Copy task text")
-                                Text(hoursDayFmt.string(from: g.day)).font(.system(size: 12, design: .monospaced)).foregroundColor(Gruv.fg4).frame(width: 42, alignment: .leading)
-                                Text(g.task.isEmpty ? "—" : g.task).foregroundColor(Gruv.fg1).textSelection(.enabled)
+                    if model.sort == .longest || model.sort == .taskAZ {
+                        let flat = model.flatGroups()
+                        if flat.isEmpty { empty }
+                        ForEach(flat) { g in groupRow(g) }
+                    } else {
+                        let days = model.days(windowed: true)
+                        if days.isEmpty { empty }
+                        ForEach(days, id: \.day) { grp in
+                            HStack {
+                                Text(hoursDayHdrFmt.string(from: grp.day)).font(.system(size: 12, weight: .semibold)).foregroundColor(Gruv.fg4)
                                 Spacer()
-                                Text(decimalHours(g.seconds) + " h").font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundColor(Gruv.fg2)
-                            }
-                            .padding(.vertical, 2)
+                                // filtered day total, so a project view adds up
+                                Text(durText(grp.groups.reduce(0) { $0 + $1.seconds })).font(.system(size: 12)).foregroundColor(Gruv.fg4)
+                            }.padding(.top, 8)
+                            ForEach(grp.groups) { g in groupRow(g) }
                         }
                     }
                 }
@@ -768,7 +807,32 @@ struct HoursWindow: View {
             }
         }
         .padding(18)
-        .frame(minWidth: 420, minHeight: 420)
+        .frame(minWidth: 520, minHeight: 420)
+    }
+
+    private var empty: some View {
+        Text(model.allMonths ? "No entries" : "No entries this month").foregroundColor(Gruv.fg4).padding(.top, 30)
+    }
+
+    private func groupRow(_ g: TaskGroup) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(g.task, forType: .string)
+                copiedKey = g.id
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if copiedKey == g.id { copiedKey = nil } }
+            } label: {
+                Image(systemName: copiedKey == g.id ? "checkmark" : "doc.on.doc")
+                    .foregroundColor(copiedKey == g.id ? Gruv.green : Gruv.fg4)
+                    .font(.system(size: 11))
+            }.buttonStyle(.plain).help("Copy task text")
+            Text((model.allMonths ? hoursDayYFmt : hoursDayFmt).string(from: g.day)).font(.system(size: 12, design: .monospaced)).foregroundColor(Gruv.fg4)
+                .frame(width: model.allMonths ? 62 : 42, alignment: .leading)
+            Text(g.task.isEmpty ? "—" : g.task).foregroundColor(Gruv.fg1).textSelection(.enabled)
+            Spacer()
+            Text(decimalHours(g.seconds) + " h").font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundColor(Gruv.fg2)
+        }
+        .padding(.vertical, 2)
     }
 }
 
@@ -778,7 +842,7 @@ final class HoursWindowController {
 
     func show(model: HoursModel) {
         if let w = window { w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 640),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         w.title = "Hours"
         w.titlebarAppearsTransparent = true
