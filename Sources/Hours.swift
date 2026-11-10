@@ -545,6 +545,7 @@ struct HoursTab: View {
                 }
             }
             .padding(.bottom, 8)
+            .padding(.trailing, 12)   // clear of the overlay scrollbar, which sat on the day's ⬆ button
         }
         .frame(maxHeight: .infinity)
     }
@@ -581,8 +582,18 @@ struct HoursTab: View {
         }.buttonStyle(.plain).help("Copy task text")
     }
 
-    // Severa project → phase picker. Nested Menu: projects, each expanding to its
-    // phases; picking a phase sets both. `current` is the label to show.
+    private func projectMenu(_ p: SeveraProject, _ onPick: @escaping (SeveraProject?, SeveraPhase?) -> Void) -> some View {
+        Menu(p.name) {
+            if p.phases.isEmpty {
+                Button(p.name) { onPick(p, nil) }
+            } else {
+                ForEach(p.phases) { ph in Button(ph.name) { onPick(p, ph) } }
+            }
+        }
+    }
+
+    // Severa project → phase picker. Nested Menu: recent projects, then "Other projects"
+    // (all open ones), each expanding to its phases; picking a phase sets both.
     private func severaMenu(current: String?, tint: Color = Gruv.blue, onPick: @escaping (SeveraProject?, SeveraPhase?) -> Void) -> some View {
         Menu {
             if !severa.configured {
@@ -592,14 +603,11 @@ struct HoursTab: View {
                 Button("Refresh") { severa.refresh() }
             } else {
                 Button("None") { onPick(nil, nil) }
-                ForEach(severa.projects) { p in
-                    Menu(p.name) {
-                        if p.phases.isEmpty {
-                            Button(p.name) { onPick(p, nil) }
-                        } else {
-                            ForEach(p.phases) { ph in Button(ph.name) { onPick(p, ph) } }
-                        }
-                    }
+                ForEach(severa.projects.filter(\.recent)) { p in projectMenu(p, onPick) }
+                let others = severa.projects.filter { !$0.recent }
+                if !others.isEmpty {
+                    Divider()
+                    Menu("Other projects") { ForEach(others) { p in projectMenu(p, onPick) } }   // open projects I'm a member of but haven't logged to lately
                 }
             }
         } label: {

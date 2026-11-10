@@ -24,6 +24,7 @@ struct SeveraProject: Codable, Identifiable, Hashable {
     let guid: String
     let name: String
     var phases: [SeveraPhase]
+    var recent = true             // logged to in the last 180 days; false = other open project I'm a member of
     var id: String { guid }
 }
 
@@ -44,7 +45,7 @@ final class SeveraModel: ObservableObject {
     private var token: String?
     private var tokenExpiry = Date.distantPast
     private var lastLoad = Date.distantPast
-    private let cacheKey = "severa.projects.v1"
+    private let cacheKey = "severa.projects.v2"
 
     init() { loadConfig(); loadCache() }
 
@@ -144,13 +145,60 @@ final class SeveraModel: ObservableObject {
             let (data, resp) = try await send(URLRequest(url: comps.url!), session)
             guard resp.statusCode == 200 else { status = "Severa: \(Self.describe(resp, data))"; return }
             let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? []
-            projects = Self.build(from: rows)
-            status = projects.isEmpty ? "No projects logged in the last 180 days" : ""
+            let recent = Self.build(from: rows)
+            projects = recent + (try await loadOthers(excluding: Set(recent.map(\.guid)), fallbackWorkType: Self.commonWorkType(rows), session))
+            status = projects.isEmpty ? "No open projects" : ""
             saveCache(projects)
         } catch {
             status = "Severa unreachable — \(error.localizedDescription)"   // keep the cached list on screen
             lastLoad = .distantPast                                          // let the next appearance retry
         }
+    }
+
+    /// Open projects I'm a member of but haven't logged to lately (e.g. a customer I'm
+    /// just starting with), with their live phases. ?projectMemberUserGuids= IS honored
+    /// (unlike ?userGuids= on workhours). ?projectGuids= on phases is honored when
+    /// REPEATED (not comma-joined), so phases come in batches of 10.
+    /// Work type = phase default, else project default, else the one I use most.
+    private func loadOthers(excluding seen: Set<String>, fallbackWorkType: (String, String)?, _ session: URLSession) async throws -> [SeveraProject] {
+        let (pd, pr) = try await send(URLRequest(url: URL(string: "\(base)/v1.0/projects?projectMemberUserGuids=\(userGuid)&isClosed=false&rowCount=100")!), session)
+        guard pr.statusCode == 200 else { return [] }
+        let projs = ((try? JSONSerialization.jsonObject(with: pd)) as? [[String: Any]] ?? [])
+            .filter { ($0["guid"] as? String).map { !seen.contains($0) } ?? false }
+        var phases: [[String: Any]] = []
+        for batch in stride(from: 0, to: projs.count, by: 10).map({ Array(projs[$0..<min($0 + 10, projs.count)]) }) {
+            var comps = URLComponents(string: "\(base)/v1.0/phases")!
+            comps.queryItems = batch.compactMap { ($0["guid"] as? String).map { URLQueryItem(name: "projectGuids", value: $0) } }
+                + [URLQueryItem(name: "rowCount", value: "1000")]
+            let (d, r) = try await send(URLRequest(url: comps.url!), session)
+            guard r.statusCode == 200 else { continue }
+            phases += (try? JSONSerialization.jsonObject(with: d)) as? [[String: Any]] ?? []
+        }
+        return Self.buildOthers(projects: projs, phases: phases, fallbackWorkType: fallbackWorkType)
+    }
+
+    static func buildOthers(projects: [[String: Any]], phases: [[String: Any]], fallbackWorkType: (String, String)?) -> [SeveraProject] {
+        var byProject: [String: [SeveraPhase]] = [:]
+        for ph in phases where ph["isCompleted"] as? Bool != true && ph["isLocked"] as? Bool != true {
+            guard let pg = (ph["project"] as? [String: Any])?["guid"] as? String, let hg = ph["guid"] as? String else { continue }
+            let wt = ph["defaultWorkType"] as? [String: Any]
+            byProject[pg, default: []].append(SeveraPhase(guid: hg, name: ph["name"] as? String ?? "—",
+                                                          workTypeGuid: wt?["guid"] as? String, workTypeName: wt?["name"] as? String))
+        }
+        return projects.compactMap { p -> SeveraProject? in
+            guard let pg = p["guid"] as? String, var phs = byProject[pg], !phs.isEmpty else { return nil }   // nothing open to log to
+            let wt = p["defaultWorkType"] as? [String: Any]
+            let fallback = ((wt?["guid"] as? String).map { ($0, wt?["name"] as? String ?? "—") }) ?? fallbackWorkType
+            for i in phs.indices where phs[i].workTypeGuid == nil { phs[i].workTypeGuid = fallback?.0; phs[i].workTypeName = fallback?.1 }
+            return SeveraProject(guid: pg, name: p["name"] as? String ?? "—", phases: phs.sorted { $0.name < $1.name }, recent: false)
+        }.sorted { $0.name < $1.name }
+    }
+
+    // The work type I log most often (guid, name) — the fallback for projects that set none.
+    static func commonWorkType(_ rows: [[String: Any]]) -> (String, String)? {
+        var n: [String: (Int, String)] = [:]
+        for r in rows { if let wt = r["workType"] as? [String: Any], let g = wt["guid"] as? String { n[g] = ((n[g]?.0 ?? 0) + 1, wt["name"] as? String ?? "—") } }
+        return n.max { $0.value.0 < $1.value.0 }.map { ($0.key, $0.value.1) }
     }
 
     /// Sync one aggregated work-hour: PATCH the existing Severa row if we've posted
@@ -268,5 +316,16 @@ final class SeveraModel: ObservableObject {
     // keyword extraction drops generic words + numbers, keeps the distinctive token
     assert(SeveraModel.keywords("Acme Consultancy 2026") == ["acme"], "customer token survives")
     assert(SeveraModel.keywords("Globex - Development 1.10.2025-30.9.2026") == ["globex"], "dates/dev dropped")
+    // other open projects: completed/locked phases dropped, project default work type fills in, phaseless project skipped
+    let others = SeveraModel.buildOthers(
+        projects: [["guid": "P3", "name": "Project Gamma", "defaultWorkType": ["guid": "W1", "name": "Consulting"]],
+                   ["guid": "P4", "name": "Project Delta"]],
+        phases: [["guid": "H4", "name": "Root", "project": ["guid": "P3"], "isLocked": true],
+                 ["guid": "H5", "name": "Done", "project": ["guid": "P3"], "isCompleted": true],
+                 ["guid": "H6", "name": "Live", "project": ["guid": "P3"]]],
+        fallbackWorkType: ("W9", "Other"))
+    assert(others.count == 1 && others[0].name == "Project Gamma" && !others[0].recent, "only the project with a live phase")
+    assert(others[0].phases.map(\.guid) == ["H6"] && others[0].phases[0].workTypeGuid == "W1", "live phase gets the project work type")
+    assert(SeveraModel.commonWorkType([["workType": ["guid": "W2", "name": "Dev"]], ["workType": ["guid": "W2", "name": "Dev"]], ["workType": ["guid": "W3", "name": "X"]]])?.0 == "W2", "most used work type")
 }
 #endif
