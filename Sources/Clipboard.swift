@@ -40,7 +40,8 @@ func cleanedURL(_ raw: String) -> String? {
                              "ttclid", "igsh", "igshid", "igsi", "srsltid", "spm", "sk", "_hsenc", "_hsmi",
                              "wt_mc", "cmpid", "ncid", "li_fat_id", "ref", "ref_src", "ref_url",
                              "soc_src", "soc_trk", "wickedid", "sms_source", "gbraid", "wbraid",
-                             "link_source", "taid"]   // TrueAnthem social-share tracking (xda-developers etc.)
+                             "link_source", "taid",   // TrueAnthem social-share tracking (xda-developers etc.)
+                             "campaign_id", "adset_id", "ad_id"]   // Meta ads landing pages (Shopify shops)
     // Pure share-tracking on these hosts, but meaningful elsewhere — keep host-scoped.
     var hostJunk: Set<String> = []
     if host.contains("youtube.com") || host == "youtu.be" { hostJunk = ["si", "feature", "pp", "start_radio"] }

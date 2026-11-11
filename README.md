@@ -157,8 +157,9 @@ Known limits (search capped at 10 per type, no Liked Songs context, the spotifyd
 
 ## Status
 
-Current: **v0.47.0**. Recent:
+Current: **v0.47.1**. Recent:
 
+- **v0.47.1** — URL cleaner: also strips Meta-ads landing-page junk (`campaign_id`, `adset_id`, `ad_id`).
 - **v0.47.0** — Hours: the Severa picker also lists the open projects you are a **member of** but haven't logged to yet, under an **Other projects** submenu below the recent ones (`GET /projects?projectMemberUserGuids=` is honored, unlike the workhours user filter; phases via repeated `?projectGuids=`, completed/locked phases dropped, work type = phase default → project default → your most used). The panel's day list keeps clear of the overlay scrollbar, which used to cover the day's ⬆ button.
 - **v0.46.0** — Hours window: project filter, all-time scope, sort. A project picker (All projects / No project / every project A–Z) and a Month/All toggle next to the month arrows; sort Newest, Oldest, Longest or Task A–Z (the last two are flat lists with the date on each row). Total and Copy follow what is shown; the panel tab and Severa sync stay month-based.
 - **v0.45.0** — Network tab: **VPN** switch on the Beryl row routes this Mac through the travel router's VPN. It runs `beryl_vpn.py status|on|off` from the same directory as `berylScript` (one JSON line on stdout), is greyed out unless the Mac is on the Beryl's Wi-Fi, and shows the VPN server after *connected* in the caption; errors show as a red `vpn: …` caption until the next refresh. spotifyd: retries playback after a failed load or late reconnect (10 min), kicks a stuck spotifyd after 3 min.
